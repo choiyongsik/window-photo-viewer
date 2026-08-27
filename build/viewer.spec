@@ -1,5 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 # Build:  python -m PyInstaller build/viewer.spec --noconfirm
+import os
+
 from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
 
 binaries = collect_dynamic_libs("pyexiv2")
@@ -7,7 +9,7 @@ datas = collect_data_files("imageio_ffmpeg")   # bundled ffmpeg.exe
 
 a = Analysis(
     ["../app.py"],
-    pathex=[".."],
+    pathex=[os.path.join(SPECPATH, "..")],  # noqa: F821 — SPECPATH is injected by PyInstaller
     binaries=binaries,
     datas=datas,
     hiddenimports=["PySide6.QtMultimedia", "PySide6.QtMultimediaWidgets"],

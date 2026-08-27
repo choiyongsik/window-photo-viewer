@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pytest
@@ -35,6 +36,17 @@ def test_scan_skips_hidden_and_tmp_files(tmp_path: Path):
     make_jpeg(tmp_path / "keep.jpg")
     (tmp_path / "keep.jpg.tmp").write_bytes(b"partial")
     assert [i.path.name for i in scan(tmp_path)] == ["keep.jpg"]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows-only hidden file attribute")
+def test_scan_skips_windows_hidden_attribute(tmp_path: Path):
+    import ctypes
+
+    hidden = make_jpeg(tmp_path / "hidden.jpg")
+    make_jpeg(tmp_path / "visible.jpg")
+    assert ctypes.windll.kernel32.SetFileAttributesW(str(hidden), 0x2)  # FILE_ATTRIBUTE_HIDDEN
+
+    assert [i.path.name for i in scan(tmp_path)] == ["visible.jpg"]
 
 
 def test_scan_empty_folder(tmp_path: Path):
