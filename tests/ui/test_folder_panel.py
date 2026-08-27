@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 
 from PySide6.QtCore import Qt
 
-from tests.helpers import make_jpeg, make_png
-from ui import folder_panel as folder_panel_module
-from ui.folder_panel import FolderEntry, FolderPanel, list_sibling_folders
+from tests.helpers import make_jpeg
+from ui.folder_panel import PLACEHOLDER_TEXT, FolderPanel, list_child_folders
 
 
 def _make_folder(base: Path, name: str, n_images: int = 1, n_videos: int = 0) -> Path:
@@ -20,225 +18,301 @@ def _make_folder(base: Path, name: str, n_images: int = 1, n_videos: int = 0) ->
     return d
 
 
-# ---------------- list_sibling_folders ----------------
+# ---------------- list_child_folders ----------------
 
-def test_list_sibling_folders_order_counts_and_hidden(tmp_path):
+def test_list_child_folders_order_and_hidden_exclusion(tmp_path):
     root = tmp_path / "root"
-    a = _make_folder(root, "A", n_images=2, n_videos=1)
-    b2 = _make_folder(root, "B2", n_images=1)
-    b10 = _make_folder(root, "B10", n_images=3, n_videos=2)
-    make_png(b2 / "extra.png")   # B2: 1 jpg + 1 png = 2 images
+    _make_folder(root, "B2")
+    _make_folder(root, "B10")
+    _make_folder(root, "A")
     hidden = root / ".hidden"
     hidden.mkdir()
-    make_jpeg(hidden / "x.jpg")
+    (root / "afile.txt").write_text("not a directory")
 
-    entries = list_sibling_folders(a)
+    result = list_child_folders(root)
 
-    assert [e.path.name for e in entries] == ["A", "B2", "B10"]
-    by_name = {e.path.name: e for e in entries}
-    assert by_name["A"] == FolderEntry(a, 2, 1)
-    assert by_name["B2"] == FolderEntry(b2, 2, 0)
-    assert by_name["B10"] == FolderEntry(b10, 3, 2)
+    assert [p.name for p in result] == ["A", "B2", "B10"]
 
 
-def test_list_sibling_folders_includes_the_current_folder(tmp_path):
+def test_list_child_folders_permission_error_returns_empty(tmp_path, monkeypatch):
     root = tmp_path / "root"
-    a = _make_folder(root, "A")
-    b2 = _make_folder(root, "B2")
+    root.mkdir()
 
-    entries = list_sibling_folders(b2)
+    def boom(self):
+        raise PermissionError("denied")
 
-    assert {e.path for e in entries} == {a, b2}
+    monkeypatch.setattr(Path, "iterdir", boom)
 
-
-def test_list_sibling_folders_folder_whose_parent_has_only_itself(tmp_path):
-    only = tmp_path / "only"
-    make_jpeg(only / "a.jpg")
-
-    entries = list_sibling_folders(only)
-
-    assert [e.path for e in entries] == [only]
-    assert entries[0].images == 1
+    assert list_child_folders(root) == []
 
 
-def test_list_sibling_folders_permission_error_yields_zero_counts_but_is_listed(tmp_path, monkeypatch):
+def test_list_child_folders_survives_a_missing_folder(tmp_path):
+    missing = tmp_path / "does-not-exist"
+    assert list_child_folders(missing) == []
+
+
+# ---------------- FolderPanel: root / lazy loading ----------------
+
+def test_set_root_shows_root_expanded(qtbot, tmp_path):
     root = tmp_path / "root"
-    locked = _make_folder(root, "Locked", n_images=1)
-    opened = _make_folder(root, "Open", n_images=1)
-
-    real_counts = folder_panel_module._counts
-
-    def boom(folder):
-        if folder == locked:
-            raise PermissionError("denied")
-        return real_counts(folder)
-
-    monkeypatch.setattr(folder_panel_module, "_counts", boom)
-
-    entries = list_sibling_folders(opened)
-    by_name = {e.path.name: e for e in entries}
-    assert by_name["Locked"] == FolderEntry(locked, 0, 0)
-    assert by_name["Open"].images == 1
-
-
-def test_list_sibling_folders_survives_a_deleted_parent(tmp_path):
-    root = tmp_path / "root"
-    a = _make_folder(root, "A", n_images=1)
-
-    shutil.rmtree(root)   # the parent directory itself is gone by the time we scan
-
-    entries = list_sibling_folders(a)
-
-    assert entries == [FolderEntry(a, 0, 0)]
-
-
-def test_list_sibling_folders_survives_a_sibling_vanishing_mid_scan(tmp_path, monkeypatch):
-    root = tmp_path / "root"
-    a = _make_folder(root, "A", n_images=1)
-    b = _make_folder(root, "B", n_images=1)
-
-    real_counts = folder_panel_module._counts
-
-    def flaky(folder):
-        if folder == b:
-            raise FileNotFoundError("vanished")
-        return real_counts(folder)
-
-    monkeypatch.setattr(folder_panel_module, "_counts", flaky)
-
-    entries = list_sibling_folders(a)
-
-    by_name = {e.path.name: e for e in entries}
-    assert by_name["B"] == FolderEntry(b, 0, 0)
-    assert by_name["A"].images == 1
-
-
-def test_list_sibling_folders_keeps_a_hidden_current_folder_listed(tmp_path):
-    root = tmp_path / "root"
-    a = _make_folder(root, "A", n_images=1)
-    hidden = root / ".hidden"
-    hidden.mkdir()
-    make_jpeg(hidden / "x.jpg")
-
-    entries = list_sibling_folders(hidden)
-
-    names = {e.path.name for e in entries}
-    assert ".hidden" in names and "A" in names
-
-
-# ---------------- FolderPanel ----------------
-
-def test_folder_panel_set_folder_and_navigation(qtbot, tmp_path):
-    root = tmp_path / "root"
-    a = _make_folder(root, "A")
-    b2 = _make_folder(root, "B2")
-    b10 = _make_folder(root, "B10")
+    _make_folder(root, "A")
 
     panel = FolderPanel()
     qtbot.addWidget(panel)
+    panel.set_root(root)
 
-    panel.set_folder(b2)
-
-    assert panel._list.count() == 3
-    assert panel.current_folder() == b2
-    assert panel.sibling_folders() == [a, b2, b10]
-    assert panel.next_folder() == b10
-    assert panel.prev_folder() == a
-
-    panel.set_folder(a)
-    assert panel.prev_folder() is None
-    assert panel.next_folder() == b2
-
-    panel.set_folder(b10)
-    assert panel.next_folder() is None
+    assert panel.root() == root
+    assert panel._tree.topLevelItemCount() == 1
+    root_item = panel._tree.topLevelItem(0)
+    assert root_item.isExpanded() is True
+    assert root_item.text(0) == "root"
+    assert root_item.toolTip(0) == str(root)
 
 
-def test_folder_panel_set_folder_within_same_parent_skips_rescan(qtbot, tmp_path, monkeypatch):
+def test_children_lazily_loaded_on_expand(qtbot, tmp_path):
+    root = tmp_path / "root"
+    a = _make_folder(root, "A")
+    _make_folder(a, "A1")
+
+    panel = FolderPanel()
+    qtbot.addWidget(panel)
+    panel.set_root(root)
+
+    a_item = panel._path_to_item[a]
+    assert a_item.isExpanded() is False
+    assert a_item.childCount() == 1
+    placeholder = a_item.child(0)
+    assert placeholder.data(0, Qt.ItemDataRole.UserRole) is None
+
+    a_item.setExpanded(True)
+
+    assert a_item.childCount() == 1
+    real_child = a_item.child(0)
+    assert real_child.data(0, Qt.ItemDataRole.UserRole) == a / "A1"
+    assert real_child.text(0) == "A1"
+
+
+def test_hidden_dirs_excluded_from_tree(qtbot, tmp_path):
     root = tmp_path / "root"
     _make_folder(root, "A")
+    hidden = root / ".hidden"
+    hidden.mkdir()
+
+    panel = FolderPanel()
+    qtbot.addWidget(panel)
+    panel.set_root(root)
+
+    root_item = panel._tree.topLevelItem(0)
+    names = [root_item.child(i).text(0) for i in range(root_item.childCount())]
+    assert names == ["A"]
+
+
+def test_set_root_none_clears(qtbot, tmp_path):
+    root = tmp_path / "root"
+    _make_folder(root, "A")
+
+    panel = FolderPanel()
+    qtbot.addWidget(panel)
+    panel.set_root(root)
+
+    panel.set_root(None)
+
+    assert panel.root() is None
+    assert panel._tree.topLevelItemCount() == 0
+    assert panel.current_folder() is None
+    assert PLACEHOLDER_TEXT in panel._header.text()
+
+
+# ---------------- FolderPanel: set_folder / highlight ----------------
+
+def test_set_folder_deep_child_expands_ancestors_and_highlights(qtbot, tmp_path):
+    root = tmp_path / "root"
     b = _make_folder(root, "B")
-
-    other_root = tmp_path / "other"
-    x = _make_folder(other_root, "X")
+    b1 = _make_folder(b, "B1")
 
     panel = FolderPanel()
     qtbot.addWidget(panel)
-    panel.set_folder(root / "A")   # populates siblings via the real scan
+    panel.set_root(root)
 
-    calls = []
-    real = folder_panel_module.list_sibling_folders
+    panel.set_folder(b1)
 
-    def counting(folder):
-        calls.append(folder)
-        return real(folder)
-
-    monkeypatch.setattr(folder_panel_module, "list_sibling_folders", counting)
-
-    panel.set_folder(b)   # same parent, already a known sibling → no rescan
-    assert calls == []
-    assert panel.current_folder() == b
-    assert panel._list.currentItem() is not None
-    assert panel._list.currentItem().data(Qt.ItemDataRole.UserRole) == b
-
-    panel.set_folder(x)   # different parent → must rescan
-    assert calls == [x]
+    assert panel.current_folder() == b1
+    b_item = panel._path_to_item[b]
+    assert b_item.isExpanded() is True
+    b1_item = panel._path_to_item[b1]
+    assert b1_item.font(0).bold() is True
+    assert panel._tree.currentItem() is b1_item
 
 
-def test_folder_panel_click_emits_folder_activated(qtbot, tmp_path):
-    root = tmp_path / "root"
-    a = _make_folder(root, "A")
-    b2 = _make_folder(root, "B2")
-
-    panel = FolderPanel()
-    qtbot.addWidget(panel)
-    panel.set_folder(b2)
-
-    with qtbot.waitSignal(panel.folder_activated, timeout=1000) as blocker:
-        panel._list.itemClicked.emit(panel._list.item(0))
-    assert blocker.args == [a]
-
-
-def test_folder_panel_click_on_current_folder_is_a_noop(qtbot, tmp_path):
+def test_set_folder_outside_root_is_a_noop(qtbot, tmp_path):
     root = tmp_path / "root"
     _make_folder(root, "A")
-    b2 = _make_folder(root, "B2")
+    other = tmp_path / "other"
+    other.mkdir()
 
     panel = FolderPanel()
     qtbot.addWidget(panel)
-    panel.set_folder(b2)
-    current_row = panel._list.currentRow()
+    panel.set_root(root)
+    panel.set_folder(root / "A")
 
-    with qtbot.assertNotEmitted(panel.folder_activated):
-        panel._list.itemClicked.emit(panel._list.item(current_row))
+    panel.set_folder(other)   # outside root: no-op
+
+    assert panel.current_folder() == root / "A"
 
 
-def test_folder_panel_set_folder_hidden_current_folder_is_listed_and_navigable(qtbot, tmp_path):
+def test_set_folder_none_clears_highlight(qtbot, tmp_path):
     root = tmp_path / "root"
-    a = _make_folder(root, "A")
-    hidden = root / ".hidden"
-    hidden.mkdir()
-    make_jpeg(hidden / "x.jpg")
+    _make_folder(root, "A")
 
     panel = FolderPanel()
     qtbot.addWidget(panel)
-    panel.set_folder(hidden)
-
-    assert panel.current_folder() == hidden
-    assert hidden in panel.sibling_folders()
-    assert panel.next_folder() == a   # natural order: '.hidden' sorts before 'A'
-
-
-def test_folder_panel_set_folder_none_clears_and_shows_placeholder(qtbot, tmp_path):
-    root = tmp_path / "root"
-    a = _make_folder(root, "A")
-
-    panel = FolderPanel()
-    qtbot.addWidget(panel)
-    panel.set_folder(a)
-    assert panel._list.count() == 1
+    panel.set_root(root)
+    panel.set_folder(root / "A")
 
     panel.set_folder(None)
 
-    assert panel._list.count() == 0
     assert panel.current_folder() is None
-    assert "폴더 없음" in panel._header.text()
+
+
+# ---------------- FolderPanel: visible_folders / navigation ----------------
+
+def test_visible_folders_dfs_order(qtbot, tmp_path):
+    root = tmp_path / "root"
+    _make_folder(root, "A")
+    b = _make_folder(root, "B")
+    _make_folder(b, "B1")
+    _make_folder(b, "B2")
+    _make_folder(root, "C")
+
+    panel = FolderPanel()
+    qtbot.addWidget(panel)
+    panel.set_root(root)
+
+    assert panel.visible_folders() == [root, root / "A", b, root / "C"]
+
+    panel._path_to_item[b].setExpanded(True)
+
+    assert panel.visible_folders() == [
+        root, root / "A", b, b / "B1", b / "B2", root / "C",
+    ]
+
+
+def test_next_prev_folder_boundaries(qtbot, tmp_path):
+    root = tmp_path / "root"
+    _make_folder(root, "A")
+    _make_folder(root, "B")
+    _make_folder(root, "C")
+
+    panel = FolderPanel()
+    qtbot.addWidget(panel)
+    panel.set_root(root)
+
+    panel.set_folder(root)
+    assert panel.prev_folder() is None
+    assert panel.next_folder() == root / "A"
+
+    panel.set_folder(root / "A")
+    assert panel.prev_folder() == root
+    assert panel.next_folder() == root / "B"
+
+    panel.set_folder(root / "C")
+    assert panel.next_folder() is None
+
+
+# ---------------- FolderPanel: click ----------------
+
+def test_click_emits_folder_activated(qtbot, tmp_path):
+    root = tmp_path / "root"
+    a = _make_folder(root, "A")
+
+    panel = FolderPanel()
+    qtbot.addWidget(panel)
+    panel.set_root(root)
+    panel.set_folder(root)
+
+    item = panel._path_to_item[a]
+    with qtbot.waitSignal(panel.folder_activated, timeout=1000) as blocker:
+        panel._tree.itemClicked.emit(item, 0)
+    assert blocker.args == [a]
+
+
+def test_click_on_current_folder_is_a_noop(qtbot, tmp_path):
+    root = tmp_path / "root"
+    a = _make_folder(root, "A")
+
+    panel = FolderPanel()
+    qtbot.addWidget(panel)
+    panel.set_root(root)
+    panel.set_folder(a)
+
+    item = panel._path_to_item[a]
+    with qtbot.assertNotEmitted(panel.folder_activated):
+        panel._tree.itemClicked.emit(item, 0)
+
+
+# ---------------- FolderPanel: contains ----------------
+
+def test_contains(qtbot, tmp_path):
+    root = tmp_path / "root"
+    a = _make_folder(root, "A")
+    other = tmp_path / "other"
+    other.mkdir()
+
+    panel = FolderPanel()
+    qtbot.addWidget(panel)
+    panel.set_root(root)
+
+    assert panel.contains(root) is True
+    assert panel.contains(a) is True
+    assert panel.contains(other) is False
+
+
+def test_contains_with_no_root_is_always_false(qtbot, tmp_path):
+    panel = FolderPanel()
+    qtbot.addWidget(panel)
+
+    assert panel.contains(tmp_path) is False
+
+
+# ---------------- FolderPanel: counts ----------------
+
+def test_counts_arrive_and_are_applied_to_the_item(qtbot, tmp_path):
+    root = tmp_path / "root"
+    a = _make_folder(root, "A", n_images=2, n_videos=1)
+
+    panel = FolderPanel()
+    qtbot.addWidget(panel)
+    panel.set_root(root)
+
+    item = panel._path_to_item[a]
+    qtbot.waitUntil(lambda: "장" in item.text(0), timeout=2000)
+    assert item.text(0) == "A   (2장 · 1영상)"
+
+
+def test_counts_arrive_without_videos_omit_the_video_count(qtbot, tmp_path):
+    root = tmp_path / "root"
+    a = _make_folder(root, "A", n_images=3)
+
+    panel = FolderPanel()
+    qtbot.addWidget(panel)
+    panel.set_root(root)
+
+    item = panel._path_to_item[a]
+    qtbot.waitUntil(lambda: "장" in item.text(0), timeout=2000)
+    assert item.text(0) == "A   (3장)"
+
+
+def test_stale_counts_are_ignored(qtbot, tmp_path):
+    root = tmp_path / "root"
+    a = _make_folder(root, "A", n_images=1)
+
+    panel = FolderPanel()
+    qtbot.addWidget(panel)
+    panel.set_root(root)
+
+    item = panel._path_to_item[a]
+    panel._path_to_item.pop(a)   # simulate the path no longer being tracked in the tree
+
+    panel._on_counts_ready({a: (99, 99)})
+
+    assert item.text(0) == "A"
