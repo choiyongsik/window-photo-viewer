@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 import stat
 from pathlib import Path
-from typing import NamedTuple
 
 from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, Signal
 from PySide6.QtWidgets import QLabel, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget
@@ -11,7 +10,6 @@ from PySide6.QtWidgets import QLabel, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
 from core.models import IMAGE_EXTENSIONS, VIDEO_EXTENSIONS
 from core.scanner import natural_key
 
-PANEL_WIDTH = 240
 PANEL_MIN_WIDTH = 180
 PLACEHOLDER_TEXT = "폴더 없음"
 # Windows marks files/dirs hidden with an attribute rather than a leading dot; 0
@@ -25,12 +23,6 @@ _HIDDEN_MASK = getattr(stat, "FILE_ATTRIBUTE_HIDDEN", 0)
 # (guards against re-listing the folder every time it is re-expanded).
 _ROLE_PATH = Qt.ItemDataRole.UserRole
 _ROLE_LOADED = Qt.ItemDataRole.UserRole + 1
-
-
-class FolderEntry(NamedTuple):
-    path: Path
-    images: int
-    videos: int
 
 
 def _is_hidden(entry: Path) -> bool:
@@ -69,20 +61,14 @@ def _counts(folder: Path) -> tuple[int, int]:
     return images, videos
 
 
-def _entry_for(path: Path) -> FolderEntry:
-    """FolderEntry for one folder, tolerant of _counts raising (e.g. the folder
-    vanished between being listed and being counted) — same (0, 0) fallback."""
-    try:
-        images, videos = _counts(path)
-    except OSError:
-        images, videos = 0, 0
-    return FolderEntry(path, images, videos)
-
-
-def list_child_folders(folder: Path) -> list[Path]:
+def list_child_folders(folder: Path, keep: frozenset[Path] = frozenset()) -> list[Path]:
     """The direct subdirectories of *folder*, natural-sorted.
 
-    Hidden directories (leading '.' or the Windows hidden attribute) are excluded.
+    Hidden directories (leading '.' or the Windows hidden attribute) are excluded,
+    except any that appear in *keep* — used so a hidden folder that is the current
+    folder (or an ancestor of it) stays reachable and navigable instead of becoming
+    a dead end once it's no longer the folder the user just opened.
+
     Ordinary filesystem races (folder vanished, permission denied, an unreadable
     directory entry) never raise here — they just yield an empty list, same as an
     empty folder. Losing a subtree should never break the rest of the tree.
@@ -99,11 +85,21 @@ def list_child_folders(folder: Path) -> list[Path]:
                 continue
         except OSError:
             continue
-        if _is_hidden(entry):
+        if _is_hidden(entry) and entry not in keep:
             continue
         dirs.append(entry)
     dirs.sort(key=lambda p: natural_key(p.name))
     return dirs
+
+
+def _safe_resolve(path: Path) -> Path:
+    """path.resolve(), falling back to path itself if resolution fails (e.g. a
+    component vanished mid-resolve) — used to normalize away '..' traversal before
+    comparing paths, never to require the path to exist."""
+    try:
+        return path.resolve()
+    except OSError:
+        return path
 
 
 def _display_name(path: Path) -> str:
@@ -126,7 +122,16 @@ class FolderCountJob(QRunnable):
         self.signals = signals
 
     def run(self) -> None:
-        counts = {path: _counts(path) for path in self.paths}
+        # _counts() already tolerates OSError internally, but this runs on a pooled
+        # worker thread with no other safety net — an unexpected exception on one
+        # path (a weird filename, a permission quirk _counts didn't anticipate)
+        # must not silently kill the whole batch (and the thread) before it emits.
+        counts: dict[Path, tuple[int, int]] = {}
+        for path in self.paths:
+            try:
+                counts[path] = _counts(path)
+            except Exception:
+                counts[path] = (0, 0)
         self.signals.counts_ready.emit(counts)
 
 
@@ -185,6 +190,20 @@ class FolderPanel(QWidget):
 
         self.set_root(None)
 
+    def shutdown(self) -> None:
+        """Stop background counting and wait (briefly) for any in-flight batch.
+
+        Call this before the panel is destroyed (e.g. from MainWindow.closeEvent).
+        QThreadPool's destructor blocks until every running job finishes; without
+        draining it first, destroying the panel while a count job is still counting
+        a large or slow (e.g. network-share) folder would stall window close for as
+        long as that job takes — unbounded. clear() drops anything still queued;
+        waitForDone(2000) gives whatever is already running a couple seconds to
+        finish, same budget as MainWindow's other worker pools.
+        """
+        self._count_pool.clear()
+        self._count_pool.waitForDone(2000)
+
     # ---------------- root ----------------
     def set_root(self, root: Path | None) -> None:
         self._count_pool.clear()
@@ -212,11 +231,15 @@ class FolderPanel(QWidget):
         return self._root
 
     def contains(self, folder: Path) -> bool:
-        """folder == root or folder is under root. Pure path test, no I/O."""
+        """folder == root or folder is under root, after resolving both to their
+        canonical form (so e.g. 'root/../other' is not mistaken for being inside
+        root). resolve() can touch the filesystem (to follow symlinks); it never
+        requires the path to exist, and falls back to the path as given if it
+        can't be resolved."""
         if self._root is None:
             return False
         try:
-            folder.relative_to(self._root)
+            _safe_resolve(folder).relative_to(_safe_resolve(self._root))
         except ValueError:
             return False
         return True
@@ -239,14 +262,22 @@ class FolderPanel(QWidget):
     def _on_item_expanded(self, item: QTreeWidgetItem) -> None:
         if item.data(0, _ROLE_LOADED):
             return   # already loaded — a placeholder never coexists with real children
+        path = item.data(0, _ROLE_PATH)
+        keep = self._keep_hidden_for(path) if path is not None else frozenset()
+        self._load_children(item, keep)
+
+    def _load_children(self, item: QTreeWidgetItem, keep: frozenset[Path] = frozenset()) -> None:
+        """(Re)loads *item*'s real children, replacing whatever is there now (a
+        placeholder on first load, or stale children on a forced reload). *keep*
+        lets a hidden directory stay listed — see list_child_folders."""
         item.setData(0, _ROLE_LOADED, True)
-        item.takeChildren()   # drop the placeholder
+        item.takeChildren()
         path = item.data(0, _ROLE_PATH)
         if path is None:
             return
 
         new_paths: list[Path] = []
-        for child_path in list_child_folders(path):
+        for child_path in list_child_folders(path, keep):
             child_item = self._make_node(child_path)
             item.addChild(child_item)
             self._path_to_item[child_path] = child_item
@@ -254,6 +285,22 @@ class FolderPanel(QWidget):
 
         if new_paths:
             self._count_pool.start(FolderCountJob(new_paths, self._count_signals))
+
+    def _keep_hidden_for(self, path: Path) -> frozenset[Path]:
+        """The one immediate child of *path* that must stay listed even if hidden,
+        because it is (or leads to) the current folder — keeps a hidden current
+        folder, or a folder under a hidden ancestor, reachable and navigable
+        instead of a dead end."""
+        current = self._current
+        if current is None:
+            return frozenset()
+        try:
+            rel_parts = current.relative_to(path).parts
+        except ValueError:
+            return frozenset()
+        if not rel_parts:
+            return frozenset()   # current == path itself, not one of its children
+        return frozenset({path / rel_parts[0]})
 
     def _on_counts_ready(self, counts: dict[Path, tuple[int, int]]) -> None:
         for path, (images, videos) in counts.items():
@@ -294,16 +341,37 @@ class FolderPanel(QWidget):
                 item.setExpanded(True)   # synchronously loads item's real children
             child = self._child_by_name(item, name)
             if child is None:
+                # Not found — possibly hidden and not kept when this node was last
+                # loaded (e.g. it only became the current folder afterwards, while
+                # the ancestor was already expanded for something else). Force a
+                # reload that keeps it, then look again.
+                path = item.data(0, _ROLE_PATH)
+                target = self._existing_dir(path, name) if path is not None else None
+                if target is not None:
+                    self._load_children(item, frozenset({target}))
+                    child = self._child_by_name(item, name)
+            if child is None:
                 return None
             item = child
         return item
 
     @staticmethod
+    def _existing_dir(parent: Path, name: str) -> Path | None:
+        candidate = parent / name
+        try:
+            return candidate if candidate.is_dir() else None
+        except OSError:
+            return None
+
+    @staticmethod
     def _child_by_name(parent: QTreeWidgetItem, name: str) -> QTreeWidgetItem | None:
+        # casefold(), not a plain ==: Windows filesystems (and thus this tree, and
+        # the paths MainWindow hands to set_folder) are case-insensitive.
+        target = name.casefold()
         for i in range(parent.childCount()):
             child = parent.child(i)
             path = child.data(0, _ROLE_PATH)
-            if path is not None and path.name == name:
+            if path is not None and path.name.casefold() == target:
                 return child
         return None
 
@@ -349,11 +417,29 @@ class FolderPanel(QWidget):
         return self._offset_folder(-1)
 
     def _offset_folder(self, delta: int) -> Path | None:
-        folders = self.visible_folders()
-        if self._current not in folders:
+        if self._current is None:
             return None
-        idx = folders.index(self._current) + delta
+        folders = self.visible_folders()
+        anchor = self._current
+        if anchor not in folders:
+            # The current folder isn't visible right now — most commonly because an
+            # ancestor got collapsed after it became current. Anchor on the nearest
+            # visible ancestor instead of giving up, so PgDn/PgUp still move.
+            anchor = self._nearest_visible_ancestor(anchor, set(folders))
+            if anchor is None:
+                return None
+        idx = folders.index(anchor) + delta
         return folders[idx] if 0 <= idx < len(folders) else None
+
+    def _nearest_visible_ancestor(self, folder: Path, visible: set[Path]) -> Path | None:
+        if self._root is None:
+            return None
+        current = folder
+        while current != self._root:
+            current = current.parent
+            if current in visible:
+                return current
+        return None
 
     # ---------------- clicking ----------------
     def _on_item_clicked(self, item: QTreeWidgetItem, _column: int) -> None:
@@ -363,6 +449,19 @@ class FolderPanel(QWidget):
         self.folder_activated.emit(path)
 
     # ---------------- misc ----------------
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        # The splitter can resize this panel at any time; re-elide against the
+        # header's actual current width rather than the width it had when the root
+        # was first set, or the header text would go stale (too short or with
+        # room to spare) after a drag.
+        if self._root is not None:
+            self._header.setText(self._elided(str(self._root)))
+
     def _elided(self, text: str) -> str:
         metrics = self._header.fontMetrics()
-        return metrics.elidedText(text, Qt.TextElideMode.ElideMiddle, PANEL_WIDTH - 16)
+        # Before the panel has ever been laid out/shown, width() can be 0 or an
+        # arbitrary default; floor it at the panel's guaranteed minimum width so
+        # eliding still makes sense in that case.
+        width = max(self._header.width(), PANEL_MIN_WIDTH) - 16
+        return metrics.elidedText(text, Qt.TextElideMode.ElideMiddle, width)

@@ -289,6 +289,15 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"{len(items)}개 항목", 3000)
 
     def open_folder(self, folder: Path) -> None:
+        # Normalize away '..'/relative traversal before anything compares this path
+        # against root_folder — otherwise e.g. "root/../other" could be judged
+        # "inside root" by a naive comparison despite actually being outside it.
+        # Falls back to the path as given if it can't be resolved (never required
+        # to exist here — ScanJob below is what actually needs it to be a folder).
+        try:
+            folder = folder.resolve()
+        except OSError:
+            pass
         # Root rule: opening a folder inside the current root just moves within the
         # tree; opening one outside it re-roots the tree at that folder. Ctrl+O
         # inside the tree therefore never disturbs the root, but any other jump does.
@@ -763,14 +772,16 @@ class MainWindow(QMainWindow):
         unaffected and stays highlighted (it is still under the new, higher root)."""
         root = self.root_folder
         if root is None or root.parent == root:
-            return
+            return   # already at the top — root.parent == root is the only way the
+            # new root (root.parent) could equal the current one, so this one check
+            # also covers the "new root equals current root" case.
         self.root_folder = root.parent
         self.folder_panel.set_folder(self.folder)
 
     def set_root_to_current_folder(self) -> None:
         """'현재 폴더를 루트로': re-root the tree at whatever folder is open now."""
-        if self.folder is None:
-            return
+        if self.folder is None or self.folder == self.root_folder:
+            return   # already the root — skip the rebuild
         self.root_folder = self.folder
         self.folder_panel.set_folder(self.folder)
 
@@ -935,6 +946,11 @@ class MainWindow(QMainWindow):
         # that is on its way out (see the _closing guards on the _on_* handlers).
         self._closing = True
         self.settings.setValue("splitter_state", self.splitter.saveState())
+        # FolderPanel owns its own count-job pool; drain it before the panel is torn
+        # down with the rest of the window, or QThreadPool's destructor would block
+        # close for as long as whatever count batch is still running (unbounded on a
+        # slow or network drive) instead of the bounded waits below.
+        self.folder_panel.shutdown()
         self._watch_timer.stop()
         watched = self._watcher.directories()
         if watched:

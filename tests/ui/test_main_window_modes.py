@@ -334,10 +334,24 @@ def test_splitter_state_persists_across_windows(win, tree, qtbot):
     second = MainWindow(thumb_cache=win.thumb_cache, settings=win.settings)
     qtbot.addWidget(second)
     second.resize(1000, 700)
-    second.show()
-    qtbot.waitExposed(second)
+    with qtbot.waitExposed(second):
+        second.show()
 
     assert second.splitter.sizes()[0] == 300
+
+
+def test_close_drains_the_folder_panel_count_pool(win, tree, qtbot, monkeypatch):
+    """closeEvent must not tear the panel down (and block on its QThreadPool
+    destructor) without draining its background count jobs first."""
+    win.open_folder(tree)
+    qtbot.waitUntil(lambda: win.folder == tree, timeout=5000)
+
+    calls: list[int] = []
+    monkeypatch.setattr(win.folder_panel, "shutdown", lambda: calls.append(1))
+
+    win.close()
+
+    assert calls == [1]
 
 
 def test_ctrl_b_toggles_folder_panel_and_persists(win, qtbot):

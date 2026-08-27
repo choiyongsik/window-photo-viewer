@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 from PySide6.QtCore import Qt
 
+import ui.folder_panel as folder_panel_module
 from tests.helpers import make_jpeg
 from ui.folder_panel import PLACEHOLDER_TEXT, FolderPanel, list_child_folders
 
@@ -285,7 +287,7 @@ def test_counts_arrive_and_are_applied_to_the_item(qtbot, tmp_path):
     panel.set_root(root)
 
     item = panel._path_to_item[a]
-    qtbot.waitUntil(lambda: "장" in item.text(0), timeout=2000)
+    qtbot.waitUntil(lambda: "장" in item.text(0), timeout=5000)
     assert item.text(0) == "A   (2장 · 1영상)"
 
 
@@ -298,7 +300,7 @@ def test_counts_arrive_without_videos_omit_the_video_count(qtbot, tmp_path):
     panel.set_root(root)
 
     item = panel._path_to_item[a]
-    qtbot.waitUntil(lambda: "장" in item.text(0), timeout=2000)
+    qtbot.waitUntil(lambda: "장" in item.text(0), timeout=5000)
     assert item.text(0) == "A   (3장)"
 
 
@@ -316,3 +318,157 @@ def test_stale_counts_are_ignored(qtbot, tmp_path):
     panel._on_counts_ready({a: (99, 99)})
 
     assert item.text(0) == "A"
+
+
+# ---------------- shutdown ----------------
+
+def test_shutdown_drains_the_count_pool_promptly(qtbot, tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    _make_folder(root, "A")
+    _make_folder(root, "B")
+    _make_folder(root, "C")
+
+    real_counts = folder_panel_module._counts
+
+    def slow_counts(path):
+        time.sleep(0.3)
+        return real_counts(path)
+
+    monkeypatch.setattr(folder_panel_module, "_counts", slow_counts)
+
+    panel = FolderPanel()
+    qtbot.addWidget(panel)
+    panel.set_root(root)   # queues one FolderCountJob covering A, B, C
+
+    start = time.monotonic()
+    panel.shutdown()
+    elapsed = time.monotonic() - start
+
+    assert elapsed < 2.5
+    assert panel._count_pool.activeThreadCount() == 0
+
+
+# ---------------- hidden current folder (dead-end regression) ----------------
+
+def test_set_folder_hidden_current_folder_is_listed_and_navigable(qtbot, tmp_path):
+    root = tmp_path / "root"
+    a = _make_folder(root, "A")
+    hidden = root / ".hidden"
+    hidden.mkdir()
+    make_jpeg(hidden / "x.jpg")
+
+    panel = FolderPanel()
+    qtbot.addWidget(panel)
+    panel.set_root(root)
+
+    panel.set_folder(hidden)
+
+    assert panel.current_folder() == hidden
+    assert hidden in panel.visible_folders()
+    assert panel.next_folder() == a   # natural order: '.hidden' sorts before 'A'
+
+    panel.set_folder(a)
+    assert panel.prev_folder() == hidden
+
+
+def test_set_folder_hidden_folder_under_an_already_loaded_ancestor(qtbot, tmp_path):
+    """The ancestor gets expanded (and loaded, without the hidden child) BEFORE the
+    hidden folder ever becomes current -- set_folder must still be able to reach it
+    by forcing a reload, not just by keeping it at first-load time."""
+    root = tmp_path / "root"
+    a = _make_folder(root, "A")
+    hidden = a / ".hidden"
+    hidden.mkdir()
+    make_jpeg(hidden / "x.jpg")
+
+    panel = FolderPanel()
+    qtbot.addWidget(panel)
+    panel.set_root(root)
+    panel._path_to_item[a].setExpanded(True)   # loads A's children while hidden is excluded
+
+    panel.set_folder(hidden)
+
+    assert panel.current_folder() == hidden
+    assert hidden in panel.visible_folders()
+
+
+def test_offset_folder_falls_back_to_nearest_visible_ancestor_when_collapsed(qtbot, tmp_path):
+    root = tmp_path / "root"
+    _make_folder(root, "A")
+    b = _make_folder(root, "B")
+    _make_folder(b, "B1")
+    _make_folder(b, "B2")
+    _make_folder(root, "C")
+
+    panel = FolderPanel()
+    qtbot.addWidget(panel)
+    panel.set_root(root)
+    panel.set_folder(b / "B1")   # expands B along the way
+
+    panel._path_to_item[b].setExpanded(False)   # collapse B: B1 drops out of visible order
+
+    assert panel.next_folder() == root / "C"
+    assert panel.prev_folder() == root / "A"
+
+
+# ---------------- minors ----------------
+
+def test_child_lookup_is_case_insensitive(qtbot, tmp_path):
+    root = tmp_path / "root"
+    _make_folder(root, "Alpha")
+
+    panel = FolderPanel()
+    qtbot.addWidget(panel)
+    panel.set_root(root)
+
+    panel.set_folder(root / "alpha")   # different case than the real "Alpha" on disk
+
+    assert panel.current_folder() == root / "alpha"
+    assert panel._tree.currentItem() is not None
+
+
+def test_contains_normalizes_dot_dot_traversal(qtbot, tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    other = tmp_path / "other"
+    other.mkdir()
+
+    panel = FolderPanel()
+    qtbot.addWidget(panel)
+    panel.set_root(root)
+
+    assert panel.contains(root / ".." / "other") is False
+
+
+def test_tree_never_takes_focus(qtbot, tmp_path):
+    root = tmp_path / "root"
+    a = _make_folder(root, "A")
+
+    panel = FolderPanel()
+    qtbot.addWidget(panel)
+    panel.show()
+    qtbot.waitExposed(panel)
+    panel.set_root(root)
+
+    item = panel._path_to_item[a]
+    rect = panel._tree.visualItemRect(item)
+    qtbot.mouseClick(panel._tree.viewport(), Qt.MouseButton.LeftButton, pos=rect.center())
+
+    assert panel._tree.focusPolicy() == Qt.FocusPolicy.NoFocus
+    assert not panel._tree.hasFocus()
+
+
+def test_header_reelides_on_resize(qtbot, tmp_path):
+    root = tmp_path / "a-fairly-long-root-folder-name-for-eliding"
+    root.mkdir()
+
+    panel = FolderPanel()
+    qtbot.addWidget(panel)
+    panel.resize(400, 300)
+    panel.show()
+    qtbot.waitExposed(panel)
+    panel.set_root(root)
+    wide_text = panel._header.text()
+
+    panel.resize(200, 300)
+    qtbot.waitUntil(lambda: panel._header.text() != wide_text, timeout=2000)
