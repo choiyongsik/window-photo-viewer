@@ -32,11 +32,15 @@ def _items(folder: Path):
 
 
 @pytest.fixture
-def siblings(tmp_path: Path) -> Path:
+def tree(tmp_path: Path) -> Path:
+    """root/{A, B/{B1, B2}, C}, each folder holding a couple of JPEGs."""
     root = tmp_path / "root"
     for name in ("A", "B", "C"):
         for i in range(2):
             make_jpeg(root / name / f"{name}_{i}.jpg", size=(80, 60))
+    for name in ("B1", "B2"):
+        for i in range(2):
+            make_jpeg(root / "B" / name / f"{name}_{i}.jpg", size=(80, 60))
     return root
 
 
@@ -220,37 +224,120 @@ def test_thumbnail_priority_uses_active_view(win, folder):
     assert win._active_view() is win.filmstrip
 
 
-def test_pagedown_opens_next_sibling_folder(win, siblings, qtbot):
-    win.open_folder(siblings / "A")
-    qtbot.waitUntil(lambda: win.folder == siblings / "A", timeout=5000)
+def test_open_folder_sets_root_when_none(win, tree, qtbot):
+    win.open_folder(tree)
+    qtbot.waitUntil(lambda: win.folder == tree, timeout=5000)
+
+    assert win.root_folder == tree
+    assert win.folder_panel.root() == tree
+
+
+def test_open_folder_inside_root_keeps_root_and_highlights(win, tree, qtbot):
+    win.open_folder(tree)
+    qtbot.waitUntil(lambda: win.folder == tree, timeout=5000)
+
+    win.open_folder(tree / "B" / "B1")
+    qtbot.waitUntil(lambda: win.folder == tree / "B" / "B1", timeout=5000)
+
+    assert win.root_folder == tree   # unchanged: B1 is inside the tree
+    assert win.folder_panel.current_folder() == tree / "B" / "B1"
+    b_item = win.folder_panel._path_to_item[tree / "B"]
+    assert b_item.isExpanded() is True
+
+
+def test_open_folder_outside_root_reroots(win, tree, tmp_path, qtbot):
+    win.open_folder(tree)
+    qtbot.waitUntil(lambda: win.folder == tree, timeout=5000)
+
+    other = tmp_path / "elsewhere"
+    make_jpeg(other / "x.jpg", size=(60, 40))
+    win.open_folder(other)
+    qtbot.waitUntil(lambda: win.folder == other, timeout=5000)
+
+    assert win.root_folder == other
+    assert win.folder_panel.root() == other
+
+
+def test_pagedown_pageup_follow_tree_visible_order(win, tree, qtbot):
+    win.open_folder(tree)
+    qtbot.waitUntil(lambda: win.folder == tree, timeout=5000)
+    assert win.folder_panel.visible_folders() == [tree, tree / "A", tree / "B", tree / "C"]
 
     qtbot.keyClick(win, Qt.Key.Key_PageDown)
-    qtbot.waitUntil(lambda: win.folder == siblings / "B", timeout=5000)
+    qtbot.waitUntil(lambda: win.folder == tree / "A", timeout=5000)
     assert len(win.model.items()) == 2
-    assert win.folder_panel.current_folder() == siblings / "B"
 
     qtbot.keyClick(win, Qt.Key.Key_PageUp)
-    qtbot.waitUntil(lambda: win.folder == siblings / "A", timeout=5000)
+    qtbot.waitUntil(lambda: win.folder == tree, timeout=5000)
 
-    assert win.folder_panel.prev_folder() is None   # already first
+    assert win.folder_panel.prev_folder() is None   # already first (the root itself)
     qtbot.keyClick(win, Qt.Key.Key_PageUp)   # no-op
-    assert win.folder == siblings / "A"
+    assert win.folder == tree
 
-    win.open_folder(siblings / "C")
-    qtbot.waitUntil(lambda: win.folder == siblings / "C", timeout=5000)
+    # Expand B (loads B1/B2) — visible order grows to include them between B and C.
+    win.folder_panel._path_to_item[tree / "B"].setExpanded(True)
+    assert win.folder_panel.visible_folders() == [
+        tree, tree / "A", tree / "B", tree / "B" / "B1", tree / "B" / "B2", tree / "C",
+    ]
+
+    win.open_folder(tree / "C")
+    qtbot.waitUntil(lambda: win.folder == tree / "C", timeout=5000)
     assert win.folder_panel.next_folder() is None   # already last
     qtbot.keyClick(win, Qt.Key.Key_PageDown)   # no-op
-    assert win.folder == siblings / "C"
+    assert win.folder == tree / "C"
 
 
-def test_folder_panel_click_opens_folder(win, siblings, qtbot):
-    win.open_folder(siblings / "A")
-    qtbot.waitUntil(lambda: win.folder == siblings / "A", timeout=5000)
+def test_folder_panel_click_opens_folder(win, tree, qtbot):
+    win.open_folder(tree)
+    qtbot.waitUntil(lambda: win.folder == tree, timeout=5000)
 
-    win.folder_panel.folder_activated.emit(siblings / "C")
+    win.folder_panel.folder_activated.emit(tree / "C")
 
-    qtbot.waitUntil(lambda: win.folder == siblings / "C", timeout=5000)
-    assert win.folder_panel.current_folder() == siblings / "C"
+    qtbot.waitUntil(lambda: win.folder == tree / "C", timeout=5000)
+    assert win.folder_panel.current_folder() == tree / "C"
+
+
+def test_alt_up_grows_root_upward_and_keeps_current_folder(win, tree, qtbot):
+    win.open_folder(tree / "A")
+    qtbot.waitUntil(lambda: win.folder == tree / "A", timeout=5000)
+    assert win.root_folder == tree / "A"   # first folder opened becomes the root
+
+    win.go_to_parent_root()
+
+    assert win.root_folder == tree
+    assert win.folder_panel.root() == tree
+    assert win.folder == tree / "A"   # current folder unaffected
+    assert win.folder_panel.current_folder() == tree / "A"
+
+
+def test_set_root_to_current_folder_action(win, tree, qtbot):
+    win.open_folder(tree)
+    qtbot.waitUntil(lambda: win.folder == tree, timeout=5000)
+    win.open_folder(tree / "B" / "B1")
+    qtbot.waitUntil(lambda: win.folder == tree / "B" / "B1", timeout=5000)
+    assert win.root_folder == tree
+
+    win.set_root_to_current_folder()
+
+    assert win.root_folder == tree / "B" / "B1"
+    assert win.folder_panel.root() == tree / "B" / "B1"
+    assert win.folder_panel.current_folder() == tree / "B" / "B1"
+
+
+def test_splitter_state_persists_across_windows(win, tree, qtbot):
+    win.open_folder(tree)
+    qtbot.waitUntil(lambda: win.folder == tree, timeout=5000)
+
+    win.splitter.setSizes([300, 700])
+    win.close()
+
+    second = MainWindow(thumb_cache=win.thumb_cache, settings=win.settings)
+    qtbot.addWidget(second)
+    second.resize(1000, 700)
+    second.show()
+    qtbot.waitExposed(second)
+
+    assert second.splitter.sizes()[0] == 300
 
 
 def test_ctrl_b_toggles_folder_panel_and_persists(win, qtbot):

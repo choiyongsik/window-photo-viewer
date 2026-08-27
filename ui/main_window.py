@@ -4,7 +4,7 @@ import sys
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QFileSystemWatcher, QSettings, Qt, QThreadPool, QTimer
+from PySide6.QtCore import QByteArray, QFileSystemWatcher, QSettings, Qt, QThreadPool, QTimer
 from PySide6.QtGui import QAction, QActionGroup, QImage, QKeyEvent, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QFileDialog, QLabel, QMainWindow, QMessageBox, QSplitter, QStackedWidget, QVBoxLayout, QWidget,
@@ -149,6 +149,10 @@ class MainWindow(QMainWindow):
 
         self.folder_panel = FolderPanel()
         self.folder_panel.folder_activated.connect(self.open_folder)
+        # Restore the last root if it still exists on disk; otherwise clear the
+        # stale setting rather than pointing the tree at a folder that's gone.
+        saved_root = self.root_folder
+        self.root_folder = saved_root if (saved_root is not None and saved_root.is_dir()) else None
 
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
         self.splitter.addWidget(self.folder_panel)
@@ -165,6 +169,10 @@ class MainWindow(QMainWindow):
         root.addWidget(self.splitter, 1)
         self.setCentralWidget(central)
         self.statusBar()
+
+        splitter_state = self.settings.value("splitter_state")
+        if isinstance(splitter_state, QByteArray):
+            self.splitter.restoreState(splitter_state)
 
         # Applied last, after folder_panel is already parented into the splitter/
         # layout — calling setVisible() on it before that made it a stray top-level
@@ -186,6 +194,15 @@ class MainWindow(QMainWindow):
         refresh_action.setShortcut(QKeySequence("F5"))
         refresh_action.triggered.connect(self.refresh_folder)
         file_menu.addAction(refresh_action)
+
+        go_up_action = QAction("루트 한 단계 위로", self)
+        go_up_action.setShortcut(QKeySequence("Alt+Up"))
+        go_up_action.triggered.connect(self.go_to_parent_root)
+        file_menu.addAction(go_up_action)
+
+        set_root_action = QAction("현재 폴더를 루트로", self)
+        set_root_action.triggered.connect(self.set_root_to_current_folder)
+        file_menu.addAction(set_root_action)
 
         view_menu = self.menuBar().addMenu("보기(&V)")
         self.auto_advance_action = QAction("별점 후 자동 다음", self)
@@ -272,6 +289,11 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"{len(items)}개 항목", 3000)
 
     def open_folder(self, folder: Path) -> None:
+        # Root rule: opening a folder inside the current root just moves within the
+        # tree; opening one outside it re-roots the tree at that folder. Ctrl+O
+        # inside the tree therefore never disturbs the root, but any other jump does.
+        if self.root_folder is None or not self.folder_panel.contains(folder):
+            self.root_folder = folder
         self._loading_folder = folder
         self.statusBar().showMessage(f"불러오는 중: {folder}")
         self.scan_pool.start(ScanJob(folder, self.signals))
@@ -374,6 +396,16 @@ class MainWindow(QMainWindow):
             self.folder_panel.setVisible(bool(on))
         if hasattr(self, "folder_panel_action") and self.folder_panel_action.isChecked() != bool(on):
             self.folder_panel_action.setChecked(bool(on))
+
+    @property
+    def root_folder(self) -> Path | None:
+        value = self.settings.value("root_folder", "", type=str)
+        return Path(value) if value else None
+
+    @root_folder.setter
+    def root_folder(self, folder: Path | None) -> None:
+        self.settings.setValue("root_folder", str(folder) if folder is not None else "")
+        self.folder_panel.set_root(folder)
 
     @property
     def sort_mode(self) -> SortMode:
@@ -726,6 +758,22 @@ class MainWindow(QMainWindow):
     def toggle_folder_panel(self) -> None:
         self.folder_panel_visible = not self.folder_panel_visible
 
+    def go_to_parent_root(self) -> None:
+        """Alt+Up: grow the tree upward by one level. The currently open folder is
+        unaffected and stays highlighted (it is still under the new, higher root)."""
+        root = self.root_folder
+        if root is None or root.parent == root:
+            return
+        self.root_folder = root.parent
+        self.folder_panel.set_folder(self.folder)
+
+    def set_root_to_current_folder(self) -> None:
+        """'현재 폴더를 루트로': re-root the tree at whatever folder is open now."""
+        if self.folder is None:
+            return
+        self.root_folder = self.folder
+        self.folder_panel.set_folder(self.folder)
+
     def _on_row_activated(self, row: int) -> None:
         if 0 <= row < self.model.rowCount():
             self._set_current(self.model.item_index_at_row(row))
@@ -886,6 +934,7 @@ class MainWindow(QMainWindow):
         # finishes while we're waiting below must not re-queue more work on a window
         # that is on its way out (see the _closing guards on the _on_* handlers).
         self._closing = True
+        self.settings.setValue("splitter_state", self.splitter.saveState())
         self._watch_timer.stop()
         watched = self._watcher.directories()
         if watched:
