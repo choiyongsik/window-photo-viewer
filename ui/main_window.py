@@ -3,13 +3,14 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import QSettings, Qt, QThreadPool
-from PySide6.QtGui import QAction, QImage, QKeyEvent, QKeySequence, QPixmap
+from PySide6.QtGui import QAction, QActionGroup, QImage, QKeyEvent, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QFileDialog, QLabel, QMainWindow, QMessageBox, QSplitter, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from core.filters import NO_FILTER, Filter
 from core.models import Label, MediaItem, MediaKind
+from core.sorting import SortMode, sort_items
 from core.thumbnails import ThumbnailCache, default_cache_dir
 from ui.folder_panel import FolderPanel
 from ui.image_cache import ImageCache
@@ -40,6 +41,7 @@ class MainWindow(QMainWindow):
         self.image_cache = ImageCache(6)
         self.model = MediaListModel(self)
         self.folder: Path | None = None
+        self._unsorted_items: list[MediaItem] = []
         self._loading_folder: Path | None = None
         self.current: int = -1
         # index -> the ImageLoadJob decoding it (jobs are kept so a cancelled queue
@@ -156,6 +158,20 @@ class MainWindow(QMainWindow):
         self.folder_panel_action.toggled.connect(lambda on: setattr(self, "folder_panel_visible", on))
         view_menu.addAction(self.folder_panel_action)
 
+        sort_menu = view_menu.addMenu("정렬")
+        self._sort_action_group = QActionGroup(self)
+        self._sort_action_group.setExclusive(True)
+        self._sort_actions: dict[SortMode, QAction] = {}
+        current_mode = self.sort_mode
+        for mode in (SortMode.NAME_ASC, SortMode.CAPTURE_DESC, SortMode.MTIME_DESC):
+            action = QAction(mode.describe(), self)
+            action.setCheckable(True)
+            action.setChecked(mode is current_mode)
+            action.triggered.connect(lambda checked=False, m=mode: setattr(self, "sort_mode", m))
+            self._sort_action_group.addAction(action)
+            sort_menu.addAction(action)
+            self._sort_actions[mode] = action
+
     # ---------------- loading ----------------
     def load_items(self, items: list[MediaItem], folder: Path | None) -> None:
         # Drop work queued for the folder we are leaving: its thumbnails and decodes
@@ -165,11 +181,12 @@ class MainWindow(QMainWindow):
         self.thumb_pool.clear()
         self.image_pool.clear()
         self.folder = folder
+        self._unsorted_items = list(items)
         self.folder_panel.set_folder(folder)
         self.video.stop()
         self.image_cache.clear()
         self._pending_images.clear()
-        self.model.set_items(items)
+        self.model.set_items(sort_items(items, self.sort_mode))
         self._index_by_id = {id(it): i for i, it in enumerate(self.model.items())}
         visible = self.model.visible_indices()
         self._set_current(visible[0] if visible else -1)
@@ -222,6 +239,32 @@ class MainWindow(QMainWindow):
             self.folder_panel.setVisible(bool(on))
         if hasattr(self, "folder_panel_action") and self.folder_panel_action.isChecked() != bool(on):
             self.folder_panel_action.setChecked(bool(on))
+
+    @property
+    def sort_mode(self) -> SortMode:
+        return SortMode.from_value(self.settings.value("sort_mode", SortMode.NAME_ASC.value, type=str))
+
+    @sort_mode.setter
+    def sort_mode(self, mode: SortMode) -> None:
+        self.settings.setValue("sort_mode", mode.value)
+        if hasattr(self, "_sort_actions"):
+            action = self._sort_actions.get(mode)
+            if action is not None and not action.isChecked():
+                action.setChecked(True)
+        self._resort()
+
+    def cycle_sort(self) -> None:
+        self.sort_mode = self.sort_mode.next()
+
+    def _resort(self) -> None:
+        current = self.current_item()
+        current_path = current.path if current is not None else None
+        self.load_items(self._unsorted_items, self.folder)
+        if current_path is not None:
+            for i, item in enumerate(self.model.items()):
+                if item.path == current_path:
+                    self._set_current(i)
+                    break
 
     def last_folder(self) -> Path | None:
         value = self.settings.value("last_folder", "", type=str)
@@ -472,6 +515,7 @@ class MainWindow(QMainWindow):
             item.path.name,
             f"{pos}/{len(visible)}",
             item.exif.format() if item.exif else "",
+            f"sort: {self.sort_mode.describe()}" if self.sort_mode is not SortMode.NAME_ASC else "",
             f"filter: {self.model.filter().describe()}" if self.model.filter().is_active else "",
             "⚠ 기록 실패" if item.write_error else "",
         ]
@@ -652,6 +696,8 @@ class MainWindow(QMainWindow):
             self.set_label(_LABEL_KEYS[key])
         elif key == Qt.Key.Key_Z:
             self.loupe.toggle_zoom()
+        elif key == Qt.Key.Key_S:
+            self.cycle_sort()
         elif key == Qt.Key.Key_G:
             self.show_grid()
         elif key == Qt.Key.Key_E:

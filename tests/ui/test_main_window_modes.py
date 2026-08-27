@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -8,6 +9,7 @@ from PySide6.QtCore import QSettings, Qt
 from core import metadata
 from core.filters import Filter
 from core.scanner import scan
+from core.sorting import SortMode
 from core.thumbnails import ThumbnailCache
 from tests.helpers import make_jpeg
 from ui.main_window import MainWindow
@@ -36,6 +38,20 @@ def siblings(tmp_path: Path) -> Path:
         for i in range(2):
             make_jpeg(root / name / f"{name}_{i}.jpg", size=(80, 60))
     return root
+
+
+@pytest.fixture
+def mtime_folder(tmp_path: Path) -> Path:
+    """5 images, name order IMG_1..IMG_5, but with distinct mtimes set so that
+    mtime order is the reverse of name order and no EXIF DateTimeOriginal is
+    present (capture_desc falls back to mtime)."""
+    folder = tmp_path / "mtime_folder"
+    paths = [make_jpeg(folder / f"IMG_{i}.jpg", size=(80, 60)) for i in range(1, 6)]
+    base = 1_700_000_000
+    for i, p in enumerate(paths):
+        t = base + i * 1000
+        os.utime(p, (t, t))
+    return folder
 
 
 @pytest.fixture
@@ -251,3 +267,58 @@ def test_ctrl_b_toggles_folder_panel_and_persists(win, qtbot):
     qtbot.addWidget(second)
     assert second.folder_panel_visible is False
     assert second.folder_panel.isHidden() is True   # applied before the window is ever shown
+
+
+def test_s_cycles_sort_mode_reorders_items_and_preserves_current(win, mtime_folder, qtbot):
+    win.load_items(_items(mtime_folder), mtime_folder)
+    assert [i.path.name for i in win.model.items()] == \
+        ["IMG_1.jpg", "IMG_2.jpg", "IMG_3.jpg", "IMG_4.jpg", "IMG_5.jpg"]
+
+    win._set_current(2)  # IMG_3.jpg
+    current_path = win.current_item().path
+
+    qtbot.keyClick(win, Qt.Key.Key_S)
+
+    assert win.sort_mode is SortMode.CAPTURE_DESC
+    assert win.settings.value("sort_mode") == "capture_desc"
+    assert "sort: 촬영일↓" in win.header.text()
+    # mtime is reversed of name order, and there is no EXIF date so capture
+    # falls back to mtime -> items now appear newest-mtime first.
+    assert [i.path.name for i in win.model.items()] == \
+        ["IMG_5.jpg", "IMG_4.jpg", "IMG_3.jpg", "IMG_2.jpg", "IMG_1.jpg"]
+    assert win.current_item().path == current_path  # current item preserved across resort
+
+    qtbot.keyClick(win, Qt.Key.Key_S)
+    assert win.sort_mode is SortMode.MTIME_DESC
+    assert "sort: 수정시각↓" in win.header.text()
+
+    qtbot.keyClick(win, Qt.Key.Key_S)
+    assert win.sort_mode is SortMode.NAME_ASC
+    assert "sort:" not in win.header.text()
+    assert [i.path.name for i in win.model.items()] == \
+        ["IMG_1.jpg", "IMG_2.jpg", "IMG_3.jpg", "IMG_4.jpg", "IMG_5.jpg"]
+    assert win.current_item().path == current_path
+
+
+def test_sort_mode_menu_group_reflects_current_mode(win, mtime_folder, qtbot):
+    win.load_items(_items(mtime_folder), mtime_folder)
+    actions = win._sort_action_group.actions()
+    assert len(actions) == 3
+
+    win.sort_mode = SortMode.MTIME_DESC
+    checked = [a for a in actions if a.isChecked()]
+    assert len(checked) == 1
+    assert win._sort_actions[SortMode.MTIME_DESC].isChecked() is True
+
+    win._sort_actions[SortMode.NAME_ASC].trigger()
+    assert win.sort_mode is SortMode.NAME_ASC
+
+
+def test_new_window_starts_in_saved_sort_mode(win, mtime_folder, qtbot):
+    win.load_items(_items(mtime_folder), mtime_folder)
+    qtbot.keyClick(win, Qt.Key.Key_S)   # -> capture_desc
+    assert win.settings.value("sort_mode") == "capture_desc"
+
+    second = MainWindow(thumb_cache=win.thumb_cache, settings=win.settings)
+    qtbot.addWidget(second)
+    assert second.sort_mode is SortMode.CAPTURE_DESC
