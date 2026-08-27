@@ -20,6 +20,7 @@ from ui.workers import ImageLoadJob, MetadataWriteJob, ScanJob, ThumbnailJob, Wo
 
 PRELOAD_OFFSETS = (1, -1, 2, -2)
 EMPTY_TEXT = "폴더를 열어주세요 (Ctrl+O)"
+NO_ITEMS_TEXT = "이 폴더에 사진이 없습니다"
 NO_MATCH_TEXT = "필터에 맞는 항목이 없습니다 (Alt+0: 필터 해제)"
 _RATING_KEYS = {Qt.Key.Key_1: 1, Qt.Key.Key_2: 2, Qt.Key.Key_3: 3, Qt.Key.Key_4: 4, Qt.Key.Key_5: 5}
 _LABEL_KEYS = {Qt.Key.Key_6: Label.RED, Qt.Key.Key_7: Label.YELLOW, Qt.Key.Key_8: Label.GREEN, Qt.Key.Key_9: Label.BLUE}
@@ -40,7 +41,9 @@ class MainWindow(QMainWindow):
         self.folder: Path | None = None
         self._loading_folder: Path | None = None
         self.current: int = -1
-        self._pending_images: set[int] = set()
+        # index -> the ImageLoadJob decoding it (jobs are kept so a cancelled queue
+        # entry can be told apart from one already running; see _cancel_stale_images)
+        self._pending_images: dict[int, ImageLoadJob] = {}
         self._index_by_id: dict[int, int] = {}
         self._closing = False
 
@@ -81,6 +84,7 @@ class MainWindow(QMainWindow):
 
         self.loupe = LoupeView()
         self.video = VideoView()
+        self.video.error.connect(self._on_video_error)
         self.content_stack = QStackedWidget()
         self.content_stack.addWidget(self.loupe)
         self.content_stack.addWidget(self.video)
@@ -131,6 +135,12 @@ class MainWindow(QMainWindow):
 
     # ---------------- loading ----------------
     def load_items(self, items: list[MediaItem], folder: Path | None) -> None:
+        # Drop work queued for the folder we are leaving: its thumbnails and decodes
+        # are worthless now and would make the new folder wait behind them.
+        # (clear() drops only queued jobs; a running one finishes and its result is
+        # discarded by _index_of, which no longer knows the old items.)
+        self.thumb_pool.clear()
+        self.image_pool.clear()
         self.folder = folder
         self.video.stop()
         self.image_cache.clear()
@@ -147,15 +157,17 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"불러오는 중: {folder}")
         self.scan_pool.start(ScanJob(folder, self.signals))
 
-    def _on_scan_finished(self, items: list[MediaItem]) -> None:
-        if self._closing:
+    def _on_scan_finished(self, items: list[MediaItem], folder: Path) -> None:
+        # scan_pool is a single FIFO thread: opening B while A is still scanning means
+        # A's result arrives after we already asked for B. Bind the result to the
+        # folder the job actually scanned and drop anything the user moved on from.
+        if self._closing or folder != self._loading_folder:
             return
-        self.load_items(items, self._loading_folder)
-        if self._loading_folder is not None:
-            self.settings.setValue("last_folder", str(self._loading_folder))
+        self.load_items(items, folder)
+        self.settings.setValue("last_folder", str(folder))
 
-    def _on_scan_failed(self, message: str) -> None:
-        if self._closing:
+    def _on_scan_failed(self, message: str, folder: Path) -> None:
+        if self._closing or folder != self._loading_folder:
             return
         self._show_error(f"폴더를 열 수 없습니다: {message}")
 
@@ -180,6 +192,8 @@ class MainWindow(QMainWindow):
         return Path(value) if value else None
 
     def choose_folder(self) -> None:
+        if self.suppress_dialogs:
+            return
         start = str(self.last_folder() or Path.home())
         chosen = QFileDialog.getExistingDirectory(self, "사진 폴더 선택", start)
         if chosen:
@@ -285,6 +299,7 @@ class MainWindow(QMainWindow):
     # ---------------- current item / display ----------------
     def _set_current(self, idx: int, *, show: bool = True) -> None:
         self.current = idx
+        self._cancel_stale_images()
         row = self.model.row_for_item_index(idx) if idx >= 0 else -1
         if row >= 0:
             self.filmstrip.set_current_row(row)
@@ -294,13 +309,18 @@ class MainWindow(QMainWindow):
         self._preload_neighbors()
         self._update_header()
 
+    def _empty_text(self) -> str:
+        """What to show when there is no current item: no folder, an empty folder, or a filter that matches nothing."""
+        if self.model.items():
+            return NO_MATCH_TEXT if self.model.filter().is_active else EMPTY_TEXT
+        return NO_ITEMS_TEXT if self.folder is not None else EMPTY_TEXT
+
     def _show_current(self) -> None:
         self.video.stop()
         item = self.current_item()
         if item is None:
             self.content_stack.setCurrentWidget(self.loupe)
-            no_match = bool(self.model.items()) and self.model.filter().is_active
-            self.loupe.set_placeholder(NO_MATCH_TEXT if no_match else EMPTY_TEXT)
+            self.loupe.set_placeholder(self._empty_text())
             return
         if item.kind is MediaKind.VIDEO:
             self.video.load(item.path)
@@ -320,8 +340,27 @@ class MainWindow(QMainWindow):
         item = self.model.items()[idx]
         if item.kind is not MediaKind.IMAGE:
             return
-        self._pending_images.add(idx)
-        self.image_pool.start(ImageLoadJob(item, self.signals))
+        job = ImageLoadJob(item, self.signals)
+        self._pending_images[idx] = job
+        self.image_pool.start(job)
+
+    def _cancel_stale_images(self) -> None:
+        """Throw away decodes the user has navigated past.
+
+        Every ImageLoadJob result is a full-size QImage (~100 MB for 24 MP), so holding
+        down an arrow key must not leave a queue of them decoding long after the user
+        stopped. QThreadPool.clear() drops only *queued* runnables — and a dropped one
+        never emits, so its index has to leave _pending_images too, or _request_image's
+        dedupe would make it un-requestable forever. Jobs that already started are left
+        pending: their result is still on its way, and re-requesting them would just
+        decode the same file twice. Whatever is still wanted is re-queued right after
+        by _show_current / _preload_neighbors, so the surviving queue is exactly the
+        current item and its ±2 neighbours.
+        """
+        self.image_pool.clear()
+        for idx, job in list(self._pending_images.items()):
+            if not job.started:
+                del self._pending_images[idx]
 
     def _preload_neighbors(self) -> None:
         visible = self.model.visible_indices()
@@ -339,7 +378,7 @@ class MainWindow(QMainWindow):
         idx = self._index_of(item)
         if idx < 0:
             return
-        self._pending_images.discard(idx)
+        self._pending_images.pop(idx, None)
         self.image_cache.put(idx, image)
         if idx == self.current:
             self.loupe.set_image(image)
@@ -350,7 +389,7 @@ class MainWindow(QMainWindow):
         idx = self._index_of(item)
         if idx < 0:
             return
-        self._pending_images.discard(idx)
+        self._pending_images.pop(idx, None)
         if not item.path.exists():
             self._remove_item(idx)
             return
@@ -384,8 +423,7 @@ class MainWindow(QMainWindow):
     def _update_header(self) -> None:
         item = self.current_item()
         if item is None:
-            no_match = bool(self.model.items()) and self.model.filter().is_active
-            self.header.setText(NO_MATCH_TEXT if no_match else EMPTY_TEXT)
+            self.header.setText(self._empty_text())
             return
         visible = self.model.visible_indices()
         pos = visible.index(self.current) + 1 if self.current in visible else 0
@@ -434,9 +472,17 @@ class MainWindow(QMainWindow):
             self._set_current(self.model.item_index_at_row(row))
 
     # ---------------- rating / label ----------------
+    # Spec §7: "재시도는 같은 키 재입력". When the last write of a value failed, the
+    # in-memory value is kept, so the plain toggle rule would read the same key press
+    # as "toggle this off" and write 0 instead of retrying. Re-dispatch the same value
+    # instead whenever the key asks for what the item already holds and that value is
+    # the one that failed to reach the file.
     def set_rating(self, rating: int) -> None:
         item = self.current_item()
         if item is None:
+            return
+        if item.write_error and item.rating == rating:
+            self._apply_change(item, rating=rating)
             return
         new = 0 if (rating != 0 and item.rating == rating) else rating
         self._apply_change(item, rating=new)
@@ -445,11 +491,17 @@ class MainWindow(QMainWindow):
         item = self.current_item()
         if item is None:
             return
+        if item.write_error and item.is_rejected:
+            self._apply_change(item, rating=-1)
+            return
         self._apply_change(item, rating=0 if item.is_rejected else -1)
 
     def set_label(self, label: Label) -> None:
         item = self.current_item()
         if item is None:
+            return
+        if item.write_error and item.label is label:
+            self._apply_change(item, label=label)
             return
         self._apply_change(item, label=Label.NONE if item.label is label else label)
 
@@ -466,10 +518,10 @@ class MainWindow(QMainWindow):
         if self.model.filter().is_active and not self.model.filter().matches(item):
             self.model.refresh_filter()
             self._reconcile_current_after_filter()
-            return
-        if rating is not None and rating > 0 and self.auto_advance:
+        elif rating is not None and rating > 0 and self.auto_advance:
             self.next_item()
-            return
+        # Unconditional: next_item() is a no-op on the last item, and the header still
+        # has to pick up the rating that was just applied.
         self._update_header()
 
     def _on_write_finished(self, item: MediaItem, error: str) -> None:
@@ -487,6 +539,20 @@ class MainWindow(QMainWindow):
             self.statusBar().setStyleSheet("")
         if idx == self.current:
             self._update_header()
+
+    def _on_video_error(self, message: str) -> None:
+        """Spec §7: an unplayable video explains itself instead of showing a black
+        rectangle. The item stays current, so rating and navigation keep working."""
+        if self._closing:
+            return
+        # QMediaPlayer reports errors asynchronously, often after the user has already
+        # moved on. Only speak up while the failing video is the one still on screen —
+        # otherwise a stale codec error would overwrite a newer, more useful message.
+        item = self.current_item()
+        if item is None or item.kind is not MediaKind.VIDEO or self.video.source_path() != item.path:
+            return
+        self.statusBar().setStyleSheet("color:#ff4040;")
+        self.statusBar().showMessage(f"재생할 수 없는 영상: {message}", 15000)
 
     # ---------------- keys ----------------
     def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802

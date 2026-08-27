@@ -118,6 +118,16 @@ def test_auto_advance_setting(win, folder, qtbot):
     assert win.current == 1
 
 
+def test_auto_advance_on_last_item_still_refreshes_header(win, folder, qtbot):
+    win.load_items(_items(folder), folder)
+    win.auto_advance = True
+    win.last_item()
+    with qtbot.waitSignal(win.signals.write_finished, timeout=5000):
+        qtbot.keyClick(win, Qt.Key.Key_4)                # next_item() is a no-op here
+    assert win.current == 4
+    assert "★★★★☆" in win.header.text()
+
+
 def test_open_folder_remembers_last_folder(win, folder, qtbot):
     assert win.last_folder() is None
     with qtbot.waitSignal(win.signals.scan_finished, timeout=5000):
@@ -125,6 +135,28 @@ def test_open_folder_remembers_last_folder(win, folder, qtbot):
     qtbot.waitUntil(lambda: win.folder == folder, timeout=2000)
     assert win.last_folder() == folder
     assert win.current == 0
+
+
+def test_second_open_wins_over_a_scan_still_in_flight(win, folder, tmp_path, qtbot):
+    """scan_pool is one FIFO thread: A finishes after the user already asked for B, so
+    A's items must not be adopted (and must not become B's `last_folder`)."""
+    second = tmp_path / "second"
+    for i in range(1, 4):
+        make_jpeg(second / f"B_{i}.jpg", size=(60, 40))
+    seen: list[tuple] = []
+    win.signals.scan_finished.connect(
+        lambda items, f: seen.append((f, win.folder, len(win.model.items())))
+    )
+
+    win.open_folder(folder)          # 5 items
+    win.open_folder(second)          # 3 items, queued behind the first scan
+
+    qtbot.waitUntil(lambda: len(seen) == 2, timeout=10000)
+    assert seen[0][0] == folder and seen[0][1] is None and seen[0][2] == 0   # A ignored
+    assert seen[1][0] == second
+    assert win.folder == second
+    assert [i.path.name for i in win.model.items()] == ["B_1.jpg", "B_2.jpg", "B_3.jpg"]
+    assert win.last_folder() == second
 
 
 def test_missing_file_is_removed_when_shown(win, folder, qtbot):

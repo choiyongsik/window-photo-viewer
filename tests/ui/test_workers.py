@@ -27,16 +27,19 @@ def test_scan_job_emits_populated_items(qtbot, tmp_path: Path):
     signals = WorkerSignals()
     with qtbot.waitSignal(signals.scan_finished, timeout=5000) as blocker:
         _pool().start(ScanJob(tmp_path, signals))
-    items = blocker.args[0]
+    items, folder = blocker.args
     assert [i.path.name for i in items] == ["a.jpg", "b.jpg"]
     assert items[0].rating == 0
+    assert folder == tmp_path        # results identify the folder they were scanned from
 
 
 def test_scan_job_failure_emits_message(qtbot, tmp_path: Path):
     signals = WorkerSignals()
     with qtbot.waitSignal(signals.scan_failed, timeout=5000) as blocker:
         _pool().start(ScanJob(tmp_path / "missing", signals))
-    assert "missing" in blocker.args[0]
+    message, folder = blocker.args
+    assert "missing" in message
+    assert folder == tmp_path / "missing"
 
 
 def test_thumbnail_job_ready_and_failed(qtbot, tmp_path: Path):
@@ -58,10 +61,13 @@ def test_thumbnail_job_ready_and_failed(qtbot, tmp_path: Path):
 def test_image_load_job_applies_orientation(qtbot, tmp_path: Path):
     item = _item(make_jpeg(tmp_path / "a.jpg", size=(40, 20), orientation=6))
     signals = WorkerSignals()
+    job = ImageLoadJob(item, signals)
+    assert job.started is False          # only true once the pool actually runs it
     with qtbot.waitSignal(signals.image_ready, timeout=5000) as blocker:
-        _pool().start(ImageLoadJob(item, signals))
+        _pool().start(job)
     got, image = blocker.args
     assert got is item and (image.width(), image.height()) == (20, 40)
+    assert job.started is True
 
 
 def test_image_load_job_failure(qtbot, tmp_path: Path):

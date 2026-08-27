@@ -16,8 +16,11 @@ class WorkerSignals(QObject):
     """Result signals carry the MediaItem object (not an index) so that results arriving
     after the item list was replaced can be recognised as stale by the receiver."""
 
-    scan_finished = Signal(object)         # list[MediaItem]
-    scan_failed = Signal(str)
+    # Scan results carry the folder they came from: the scan pool is FIFO with one
+    # thread, so opening B while A is still scanning would otherwise bind A's items
+    # to B's path.
+    scan_finished = Signal(object, object)  # list[MediaItem], Path (scanned folder)
+    scan_failed = Signal(str, object)       # error text, Path (scanned folder)
     thumbnail_ready = Signal(object, str)  # MediaItem, cached thumbnail path
     thumbnail_failed = Signal(object, str)
     image_ready = Signal(object, QImage)
@@ -36,9 +39,9 @@ class ScanJob(QRunnable):
             for item in items:
                 metadata.populate(item)
         except Exception as exc:
-            self.signals.scan_failed.emit(f"{self.folder}: {exc}")
+            self.signals.scan_failed.emit(f"{self.folder}: {exc}", self.folder)
             return
-        self.signals.scan_finished.emit(items)
+        self.signals.scan_finished.emit(items, self.folder)
 
 
 class ThumbnailJob(QRunnable):
@@ -59,8 +62,13 @@ class ImageLoadJob(QRunnable):
     def __init__(self, item: MediaItem, signals: WorkerSignals):
         super().__init__()
         self.item, self.signals = item, signals
+        # Set the moment the job leaves the queue. The window cancels queued decodes
+        # with QThreadPool.clear() when the user navigates away; a cleared job never
+        # runs and never emits, and this flag is how the window tells the two apart.
+        self.started = False
 
     def run(self) -> None:
+        self.started = True
         reader = QImageReader(str(self.item.path))
         reader.setAutoTransform(True)  # honour EXIF orientation
         image = reader.read()

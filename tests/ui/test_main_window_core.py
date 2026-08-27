@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 from PySide6.QtCore import QSettings, Qt
+from PySide6.QtGui import QImage
 
 from core import metadata
 from core.models import Label, MediaKind
@@ -155,6 +156,147 @@ def test_write_failure_marks_item_and_status(win, folder, qtbot, monkeypatch):
     assert item.write_error == "locked"
     assert "locked" in win.statusBar().currentMessage()
     assert "기록 실패" in win.header.text()
+
+
+def test_write_failure_retry_repeats_the_same_value(win, folder, qtbot, monkeypatch):
+    """Spec §7: 재시도는 같은 키 재입력 — pressing 3 again after a failed write of 3
+    must write 3 once more, not read as 'toggle the 3 off'."""
+    calls: list[tuple[int, Label]] = []
+
+    def flaky(path, kind, rating, label):
+        calls.append((rating, label))
+        if len(calls) == 1:
+            raise metadata.MetadataError("locked")
+
+    monkeypatch.setattr(workers.metadata, "write_rating_label", flaky)
+    win.load_items(_items(folder), folder)
+    win.next_item()
+    item = win.current_item()
+
+    with qtbot.waitSignal(win.signals.write_finished, timeout=5000):
+        qtbot.keyClick(win, Qt.Key.Key_3)
+    assert item.rating == 3 and item.write_error == "locked"
+
+    with qtbot.waitSignal(win.signals.write_finished, timeout=5000):
+        qtbot.keyClick(win, Qt.Key.Key_3)
+    assert item.rating == 3 and item.write_error is None
+    assert calls == [(3, Label.NONE), (3, Label.NONE)]
+    assert "기록 실패" not in win.header.text()
+
+
+def test_write_failure_retry_for_reject_and_label(win, folder, qtbot, monkeypatch):
+    failing = {"on": True}
+
+    def flaky(path, kind, rating, label):
+        if failing["on"]:
+            raise metadata.MetadataError("locked")
+
+    monkeypatch.setattr(workers.metadata, "write_rating_label", flaky)
+    win.load_items(_items(folder), folder)
+    win.next_item()
+    item = win.current_item()
+
+    with qtbot.waitSignal(win.signals.write_finished, timeout=5000):
+        qtbot.keyClick(win, Qt.Key.Key_X)
+    assert item.rating == -1 and item.write_error == "locked"
+    failing["on"] = False
+    with qtbot.waitSignal(win.signals.write_finished, timeout=5000):
+        qtbot.keyClick(win, Qt.Key.Key_X)
+    assert item.rating == -1 and item.write_error is None      # retried, did not un-reject
+
+    failing["on"] = True
+    with qtbot.waitSignal(win.signals.write_finished, timeout=5000):
+        qtbot.keyClick(win, Qt.Key.Key_6)
+    assert item.label is Label.RED and item.write_error == "locked"
+    failing["on"] = False
+    with qtbot.waitSignal(win.signals.write_finished, timeout=5000):
+        qtbot.keyClick(win, Qt.Key.Key_6)
+    assert item.label is Label.RED and item.write_error is None  # retried, did not clear
+
+
+def test_video_error_is_reported_and_keeps_the_item_current(win, folder, qtbot):
+    win.load_items(_items(folder), folder)
+    assert win.current_item().kind is MediaKind.VIDEO      # clip.mp4 sorts first
+
+    win.video.error.emit("codec")
+
+    message = win.statusBar().currentMessage()
+    assert "재생할 수 없는 영상" in message and "codec" in message
+    assert win.current == 0 and win.current_item().kind is MediaKind.VIDEO
+    win.set_rating(3)                                      # rating still works on it
+    assert win.current_item().rating == 3
+
+
+def test_stale_video_error_does_not_overwrite_the_status_bar(win, folder, qtbot):
+    """QMediaPlayer reports late; an error about a video the user already left must not
+    clobber a newer message."""
+    win.load_items(_items(folder), folder)
+    win.next_item()                                        # away from clip.mp4
+    win.statusBar().showMessage("기록 실패: locked", 15000)
+
+    win.video.error.emit("codec")
+
+    assert win.statusBar().currentMessage() == "기록 실패: locked"
+
+
+def test_navigation_cancels_queued_image_jobs(win, folder, qtbot, monkeypatch):
+    win.load_items(_items(folder), folder)
+    real_clear = win.image_pool.clear
+    cleared: list[int] = []
+
+    def counting_clear():
+        cleared.append(1)
+        real_clear()
+
+    monkeypatch.setattr(win.image_pool, "clear", counting_clear)
+    win.next_item()
+    win.next_item()
+
+    assert len(cleared) >= 2
+    # A cancelled job never emits, so its index must have been re-requested rather
+    # than left pending forever — otherwise the loupe would stay on the placeholder.
+    qtbot.waitUntil(lambda: win.loupe.has_image, timeout=5000)
+    assert win.current == 2
+
+
+def test_opening_another_folder_drops_stale_image_results(win, folder, tmp_path, qtbot):
+    win.load_items(_items(folder), folder)
+    qtbot.waitUntil(lambda: 1 in win.image_cache, timeout=5000)
+    stale_item = win.model.items()[1]                       # belongs to the first folder
+
+    second = tmp_path / "second"
+    make_jpeg(second / "B_1.jpg", size=(90, 60))
+    make_jpeg(second / "B_2.jpg", size=(90, 60))
+    win.load_items(_items(second), second)
+
+    assert len(win.image_cache) == 0                        # nothing carried over
+    assert all(0 <= i < len(win.model.items()) for i in win._pending_images)
+    qtbot.waitUntil(lambda: win.loupe.has_image, timeout=5000)
+    before = {i: win.image_cache.get(i) for i in range(len(win.model.items()))}
+
+    win.signals.image_ready.emit(stale_item, QImage(2, 2, QImage.Format.Format_RGB32))
+
+    assert {i: win.image_cache.get(i) for i in range(len(win.model.items()))} == before
+    assert win.image_cache.get(0).width() == 90             # still the new folder's image
+
+
+def test_empty_folder_shows_dedicated_message(win, tmp_path):
+    empty = tmp_path / "empty"
+    empty.mkdir()
+
+    win.load_items([], empty)
+
+    assert "사진이 없습니다" in win.header.text()
+    assert "Ctrl+O" not in win.header.text()
+    assert "사진이 없습니다" in win.loupe._text_item.text()   # same message in the viewport
+
+    win.load_items([], None)                                  # no folder open → the old prompt
+    assert "Ctrl+O" in win.header.text()
+
+
+def test_choose_folder_is_a_noop_when_dialogs_are_suppressed(win):
+    win.choose_folder()          # would block on a modal dialog if not suppressed
+    assert win.folder is None
 
 
 def test_filmstrip_click_changes_current(win, folder, qtbot):
