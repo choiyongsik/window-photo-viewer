@@ -300,6 +300,26 @@ def test_s_cycles_sort_mode_reorders_items_and_preserves_current(win, mtime_fold
     assert win.current_item().path == current_path
 
 
+def test_s_does_not_re_request_thumbnails_or_stop_video(win, mtime_folder, qtbot, monkeypatch):
+    win.load_items(_items(mtime_folder), mtime_folder)
+    qtbot.waitUntil(lambda: win.model.thumbnail(0) is not None, timeout=5000)
+    pixmap_before = win.model.thumbnail(0)   # item that started at index 0 (IMG_1.jpg)
+
+    thumb_starts: list[int] = []
+    monkeypatch.setattr(win.thumb_pool, "start", lambda job: thumb_starts.append(1))
+    stop_calls: list[int] = []
+    monkeypatch.setattr(win.video, "stop", lambda: stop_calls.append(1))
+
+    qtbot.keyClick(win, Qt.Key.Key_S)   # -> capture_desc, reverses order
+
+    assert thumb_starts == []            # reorder must not re-request any thumbnail
+    assert stop_calls == []              # and must not touch video playback
+    # the thumbnail followed its item to the new index (now last, since order reversed)
+    new_index = win.model.items().index(next(
+        it for it in win.model.items() if it.path.name == "IMG_1.jpg"))
+    assert win.model.thumbnail(new_index) is pixmap_before
+
+
 def test_sort_mode_menu_group_reflects_current_mode(win, mtime_folder, qtbot):
     win.load_items(_items(mtime_folder), mtime_folder)
     actions = win._sort_action_group.actions()
@@ -351,6 +371,14 @@ def test_f5_refreshes_when_file_added_and_preserves_current(win, folder, qtbot):
     current_path = win.current_item().path
     old_count = len(win.model.items())
 
+    # Isolate from the folder watcher so only the F5 key path can cause the reload
+    # (make_jpeg below would otherwise also fire directoryChanged and refresh on its
+    # own within the wait below, which would pass even if F5 did nothing).
+    win._watch_timer.stop()
+    watched = win._watcher.directories()
+    if watched:
+        win._watcher.removePaths(watched)
+
     make_jpeg(folder / "IMG_6.jpg", size=(80, 60))
     qtbot.keyClick(win, Qt.Key.Key_F5)
 
@@ -358,7 +386,11 @@ def test_f5_refreshes_when_file_added_and_preserves_current(win, folder, qtbot):
     assert win.current_item().path == current_path
 
 
-def test_f5_with_no_changes_does_not_reload(win, folder, qtbot, monkeypatch):
+def test_f5_reloads_even_when_the_path_set_is_unchanged(win, folder, qtbot, monkeypatch):
+    """F5 (and any other explicit re-open of the already-open folder) must always
+    re-read from disk, unlike a watcher-triggered refresh -- otherwise externally
+    edited ratings/labels (e.g. from Lightroom or exiftool) could never be picked up
+    just because no file was added or removed."""
     win.load_items(_items(folder), folder)
     calls: list[int] = []
     real = win.load_items
@@ -371,6 +403,41 @@ def test_f5_with_no_changes_does_not_reload(win, folder, qtbot, monkeypatch):
 
     with qtbot.waitSignal(win.signals.scan_finished, timeout=5000):
         qtbot.keyClick(win, Qt.Key.Key_F5)
+
+    assert calls == [1]
+    assert "새로고침" in win.statusBar().currentMessage()
+
+
+def test_f5_picks_up_an_externally_edited_rating(win, folder, qtbot):
+    win.load_items(_items(folder), folder)
+    item = win.model.items()[1]   # IMG_2.jpg, rating 3 per the `folder` fixture
+    assert item.path.name == "IMG_2.jpg" and item.rating == 3
+
+    metadata.write_rating_label(item.path, item.kind, 5, metadata.Label.NONE)
+
+    with qtbot.waitSignal(win.signals.scan_finished, timeout=5000):
+        qtbot.keyClick(win, Qt.Key.Key_F5)
+
+    updated = next(it for it in win.model.items() if it.path == item.path)
+    assert updated.rating == 5
+
+
+def test_watcher_triggered_refresh_skips_reload_when_the_path_set_is_unchanged(win, folder, qtbot, monkeypatch):
+    """A watcher-triggered refresh (unlike F5) is expected to fire for our own XMP
+    tmp+rename writes; when nothing was actually added or removed, it must not
+    reload (that's what keeps a rating write from resetting scroll position)."""
+    win.load_items(_items(folder), folder)
+    calls: list[int] = []
+    real = win.load_items
+
+    def wrapper(*a, **k):
+        calls.append(1)
+        return real(*a, **k)
+
+    monkeypatch.setattr(win, "load_items", wrapper)
+
+    with qtbot.waitSignal(win.signals.scan_finished, timeout=5000):
+        win._watcher.directoryChanged.emit(str(folder))   # simulate an OS notification with nothing actually changed
 
     assert calls == []
     assert "변경 없음" in win.statusBar().currentMessage()
@@ -388,18 +455,13 @@ def test_folder_watcher_detects_new_file(win, folder, qtbot):
 
 def test_own_metadata_write_does_not_trigger_a_reload(win, folder, qtbot, monkeypatch):
     win.load_items(_items(folder), folder)
+    win._watch_timer.setInterval(50)
     calls: list[int] = []
-    real = win.load_items
-
-    def wrapper(*a, **k):
-        calls.append(1)
-        return real(*a, **k)
-
-    monkeypatch.setattr(win, "load_items", wrapper)
+    monkeypatch.setattr(win, "refresh_folder", lambda: calls.append(1))
     win.next_item()
 
     with qtbot.waitSignal(win.signals.write_finished, timeout=5000):
         win.set_rating(3)
 
-    qtbot.wait(300)
+    qtbot.wait(400)
     assert calls == []

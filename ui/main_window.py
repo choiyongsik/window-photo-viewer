@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 import time
 from pathlib import Path
 
@@ -43,6 +44,13 @@ def _digit_from_event(event: QKeyEvent) -> int | None:
     key = event.key()
     if key in _RATING_KEYS:
         return _RATING_KEYS[key]
+    if sys.platform != "win32":
+        # _VK_DIGITS is the Windows VK_1..VK_5 virtual-key namespace; nativeVirtualKey()
+        # returns a different, platform-specific code space elsewhere (X11 keysyms,
+        # macOS virtual keycodes), so the lookup below would be meaningless there. This
+        # app targets Windows only (see README), so that's the only platform it needs to
+        # cover -- just don't misinterpret an unrelated code as a digit on another OS.
+        return None
     return _VK_DIGITS.get(event.nativeVirtualKey())
 
 
@@ -59,7 +67,6 @@ class MainWindow(QMainWindow):
         self.image_cache = ImageCache(6)
         self.model = MediaListModel(self)
         self.folder: Path | None = None
-        self._unsorted_items: list[MediaItem] = []
         self._loading_folder: Path | None = None
         self.current: int = -1
         # index -> the ImageLoadJob decoding it (jobs are kept so a cancelled queue
@@ -68,6 +75,8 @@ class MainWindow(QMainWindow):
         self._index_by_id: dict[int, int] = {}
         self._closing = False
         self._restore_path: Path | None = None
+        self._refresh_from_watcher = False
+        self._watch_unavailable_warned = False
         self._suppress_watch_until: float = 0.0
         self._watcher = QFileSystemWatcher(self)
         self._watcher.directoryChanged.connect(self._on_directory_changed)
@@ -169,6 +178,10 @@ class MainWindow(QMainWindow):
         open_action.triggered.connect(self.choose_folder)
         file_menu.addAction(open_action)
 
+        # F5 is handled entirely through this QAction's shortcut (same pattern as
+        # Ctrl+O above) rather than an explicit branch in keyPressEvent -- Qt's
+        # shortcut dispatch consumes the key event before it would reach
+        # keyPressEvent, including under qtbot.keyClick in the offscreen tests.
         refresh_action = QAction("새로고침", self)
         refresh_action.setShortcut(QKeySequence("F5"))
         refresh_action.triggered.connect(self.refresh_folder)
@@ -212,7 +225,6 @@ class MainWindow(QMainWindow):
         self.thumb_pool.clear()
         self.image_pool.clear()
         self.folder = folder
-        self._unsorted_items = list(items)
         self.folder_panel.set_folder(folder)
         self.video.stop()
         self.image_cache.clear()
@@ -222,7 +234,9 @@ class MainWindow(QMainWindow):
         if watched:
             self._watcher.removePaths(watched)
         if folder is not None:
-            self._watcher.addPath(str(folder))
+            if not self._watcher.addPath(str(folder)) and not self._watch_unavailable_warned:
+                self._watch_unavailable_warned = True
+                self.statusBar().showMessage("폴더 감시를 시작할 수 없습니다", 5000)
         self._index_by_id = {id(it): i for i, it in enumerate(self.model.items())}
         visible = self.model.visible_indices()
         self._set_current(visible[0] if visible else -1)
@@ -238,15 +252,25 @@ class MainWindow(QMainWindow):
         # scan_pool is a single FIFO thread: opening B while A is still scanning means
         # A's result arrives after we already asked for B. Bind the result to the
         # folder the job actually scanned and drop anything the user moved on from.
+        # from_watcher is captured (and the flag cleared) unconditionally on every
+        # call, whichever branch below ends up running, so it never leaks into an
+        # unrelated later refresh.
+        from_watcher = self._refresh_from_watcher
+        self._refresh_from_watcher = False
         if self._closing or folder != self._loading_folder:
+            self._restore_path = None
             return
         if folder == self.folder:
-            # A refresh (F5 or the folder watcher) of the folder already open. Our own
-            # XMP writes (tmp+rename) fire the watcher too; if nothing actually changed
-            # on disk, skip the reload so it doesn't disturb scroll position / selection.
+            # A refresh (F5, a manual re-open of the same folder, or the folder
+            # watcher) of the folder already open. Our own XMP writes (tmp+rename)
+            # fire the watcher too; when a watcher-triggered refresh finds nothing
+            # actually changed on disk, skip the reload so it doesn't disturb scroll
+            # position / selection. An explicit refresh (F5 / re-open) always reloads
+            # even when the path set is unchanged, so that externally edited ratings
+            # or labels (e.g. from Lightroom or exiftool) are picked up.
             new_paths = {it.path for it in items}
             old_paths = {it.path for it in self.model.items()}
-            if new_paths == old_paths:
+            if from_watcher and new_paths == old_paths:
                 self._restore_path = None
                 self.statusBar().showMessage("변경 없음", 2000)
                 self.settings.setValue("last_folder", str(folder))
@@ -261,6 +285,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"{len(items)}개 항목 (새로고침)", 3000)
             self.settings.setValue("last_folder", str(folder))
             return
+        self._restore_path = None
         self.load_items(items, folder)
         self.settings.setValue("last_folder", str(folder))
 
@@ -272,6 +297,8 @@ class MainWindow(QMainWindow):
         self.open_folder(self.folder)
 
     def _on_scan_failed(self, message: str, folder: Path) -> None:
+        self._refresh_from_watcher = False
+        self._restore_path = None
         if self._closing or folder != self._loading_folder:
             return
         self._show_error(f"폴더를 열 수 없습니다: {message}")
@@ -285,7 +312,11 @@ class MainWindow(QMainWindow):
         if self._closing:
             return
         if time.monotonic() < self._suppress_watch_until:
-            return   # our own XMP write is still within its suppression window
+            # Our own XMP write is still within its suppression window. Re-arm so a
+            # genuine external change that lands during this window is not lost.
+            self._watch_timer.start()
+            return
+        self._refresh_from_watcher = True
         self.refresh_folder()
 
     def _show_error(self, message: str) -> None:
@@ -322,6 +353,8 @@ class MainWindow(QMainWindow):
 
     @sort_mode.setter
     def sort_mode(self, mode: SortMode) -> None:
+        if mode is self.sort_mode:
+            return
         self.settings.setValue("sort_mode", mode.value)
         if hasattr(self, "_sort_actions"):
             action = self._sort_actions.get(mode)
@@ -333,14 +366,25 @@ class MainWindow(QMainWindow):
         self.sort_mode = self.sort_mode.next()
 
     def _resort(self) -> None:
-        current = self.current_item()
-        current_path = current.path if current is not None else None
-        self.load_items(self._unsorted_items, self.folder)
-        if current_path is not None:
-            for i, item in enumerate(self.model.items()):
-                if item.path == current_path:
-                    self._set_current(i)
-                    break
+        # Reorders the SAME MediaItem objects already in the model rather than a
+        # full load_items() reload: a reload would re-request every thumbnail (N
+        # ThumbnailJobs per `S` press) and could race a still-in-flight job for the
+        # same item against a new one on the same on-disk cache file. Identity-based
+        # reorder keeps thumbnail/failed/requested state, so nothing is re-requested.
+        current_item = self.current_item()
+        ordered = sort_items(self.model.items(), self.sort_mode)
+        self.model.reorder(ordered)
+        self._index_by_id = {id(it): i for i, it in enumerate(self.model.items())}
+        # image_cache / _pending_images are keyed by positional index, which the
+        # reorder just changed -- drop them rather than risk showing the wrong
+        # item's decoded image at a given index. The item itself didn't change, so
+        # the loupe/video already on screen stays correct without a reload.
+        self.image_cache.clear()
+        self._pending_images.clear()
+        if current_item is not None:
+            idx = self._index_of(current_item)
+            if idx >= 0:
+                self._set_current(idx, show=False)
 
     def last_folder(self) -> Path | None:
         value = self.settings.value("last_folder", "", type=str)
@@ -785,8 +829,6 @@ class MainWindow(QMainWindow):
             self.show_loupe()
         elif key in (Qt.Key.Key_F, Qt.Key.Key_F11):
             self.toggle_fullscreen()
-        elif key == Qt.Key.Key_F5:
-            self.refresh_folder()
         elif key == Qt.Key.Key_Escape and self.isFullScreen():
             self.showNormal()
         else:

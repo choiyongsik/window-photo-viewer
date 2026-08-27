@@ -60,6 +60,16 @@ def test_capture_time_falls_back_to_mtime_on_parse_failure():
     assert capture_time(item) == 123.0
 
 
+def test_capture_time_falls_back_to_mtime_on_out_of_range_dates():
+    """datetime.timestamp() on a naive datetime raises OSError on Windows for dates
+    outside the local mktime range (e.g. pre-1970 in a UTC+ timezone, or far-future
+    dates) -- capture_time must treat that the same as any other parse failure."""
+    for dto in ("1904:01:01 00:00:00", "1969:12:31 23:00:00",
+                "1970:01:01 00:00:00", "9999:12:31 23:59:59"):
+        item = _item("a.jpg", mtime=123.0, dto=dto)
+        assert capture_time(item) == 123.0
+
+
 def test_capture_time_video_has_no_exif_falls_back_to_mtime():
     item = _item("clip.mp4", mtime=456.0, kind=MediaKind.VIDEO)
     assert capture_time(item) == 456.0

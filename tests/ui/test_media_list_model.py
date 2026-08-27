@@ -77,3 +77,37 @@ def test_set_thumbnail_for_hidden_item_does_not_emit(qtbot):
     with qtbot.assertNotEmitted(m.dataChanged):
         m.set_thumbnail(0, QPixmap(2, 2))
     assert m.thumbnail(0) is not None
+
+
+def test_reorder_permutes_thumbnail_failed_and_requested_state_by_identity(qtbot):
+    m = MediaListModel()
+    items = _items(0, 3, 5)          # indices 0, 1, 2
+    m.set_items(items)
+    pm = QPixmap(4, 4)
+    m.set_thumbnail(1, pm)           # items[1] has a thumbnail
+    m.mark_requested(1)
+    m.set_thumbnail_failed(2)        # items[2] failed
+
+    reordered = [items[2], items[0], items[1]]   # new order: old-2, old-0, old-1
+    m.reorder(reordered)
+
+    assert m.items() == reordered
+    assert m.thumbnail(2) is pm                  # followed items[1] to its new index (2)
+    assert m.has_thumbnail_request(2) is True
+    assert m.data(m.index(2), MediaListModel.FailedRole) is False
+    assert m.data(m.index(0), MediaListModel.FailedRole) is True  # followed items[2] to index 0
+    assert m.visible_indices() == [0, 1, 2]      # no filter active
+
+
+def test_reorder_keeps_the_active_filter():
+    m = MediaListModel()
+    items = _items(0, 3, 5)
+    m.set_items(items)
+    m.set_filter(Filter(min_rating=3))
+    assert m.visible_indices() == [1, 2]
+
+    reordered = [items[2], items[1], items[0]]
+    m.reorder(reordered)
+
+    assert m.filter() == Filter(min_rating=3)
+    assert m.visible_indices() == [0, 1]         # ratings 5 and 3, now at indices 0 and 1

@@ -41,7 +41,11 @@ def capture_time(item: MediaItem) -> float:
         for fmt in _DATE_FORMATS:
             try:
                 return datetime.datetime.strptime(dto, fmt).timestamp()
-            except ValueError:
+            except (ValueError, OverflowError, OSError):
+                # .timestamp() on a naive datetime calls the platform mktime(), which
+                # raises OSError on Windows for dates outside its representable range
+                # (e.g. pre-1970 in a UTC+ timezone, or far-future dates) -- treat that
+                # exactly like a normal parse failure and fall back to mtime.
                 continue
     return item.mtime
 

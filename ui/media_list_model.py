@@ -34,6 +34,33 @@ class MediaListModel(QAbstractListModel):
     def items(self) -> list[MediaItem]:
         return self._items
 
+    def reorder(self, items: list[MediaItem]) -> None:
+        """Same item objects as currently held, in a new order (a resort). Permutes
+        the thumbnail/failed/requested tracking dicts by item identity instead of
+        dropping them, so cached/in-flight thumbnail state follows each item to its
+        new index. The active filter is kept and re-applied to the new order."""
+        self.beginResetModel()
+        old_index_by_id = {id(it): i for i, it in enumerate(self._items)}
+        self._items = list(items)
+        new_thumbs: dict[int, QPixmap] = {}
+        new_failed: set[int] = set()
+        new_requested: set[int] = set()
+        for new_idx, it in enumerate(self._items):
+            old_idx = old_index_by_id.get(id(it))
+            if old_idx is None:
+                continue
+            if old_idx in self._thumbs:
+                new_thumbs[new_idx] = self._thumbs[old_idx]
+            if old_idx in self._failed:
+                new_failed.add(new_idx)
+            if old_idx in self._requested:
+                new_requested.add(new_idx)
+        self._thumbs = new_thumbs
+        self._failed = new_failed
+        self._requested = new_requested
+        self._visible = self._filter.apply(self._items)
+        self.endResetModel()
+
     def set_filter(self, f: Filter) -> None:
         self._filter = f
         self.refresh_filter()

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 import subprocess
+import threading
 from pathlib import Path
 
 from PIL import Image, ImageOps
@@ -72,7 +73,10 @@ class ThumbnailCache:
         dst = self.cache_path(item)
         if dst.exists():
             return dst
-        part = dst.with_name(dst.stem + ".part.jpg")
+        # Unique per (process, thread) so two ThumbnailJobs racing on the same item
+        # (e.g. a resort re-requesting the current item while an earlier job for it
+        # is still running) never write the same '.part.jpg' file at once.
+        part = dst.with_name(f"{dst.stem}.{os.getpid()}-{threading.get_ident()}.part.jpg")
         try:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
             if item.kind is MediaKind.VIDEO:
@@ -81,9 +85,20 @@ class ThumbnailCache:
                 make_image_thumbnail(item.path, part)
             os.replace(part, dst)
         except ThumbnailError:
-            part.unlink(missing_ok=True)
+            self._safe_unlink(part)
             raise
         except OSError as exc:
-            part.unlink(missing_ok=True)
+            self._safe_unlink(part)
+            if dst.exists():
+                # Another thread's job for the same item already won the race and
+                # produced dst; our failure to replace it is not a real error.
+                return dst
             raise ThumbnailError(f"{item.path.name}: {exc}") from exc
         return dst
+
+    @staticmethod
+    def _safe_unlink(path: Path) -> None:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass

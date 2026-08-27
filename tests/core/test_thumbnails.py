@@ -151,3 +151,35 @@ def test_cache_generates_png_thumbnail(tmp_path: Path):
     cache = ThumbnailCache(tmp_path / "cache")
     item = _item(make_png(tmp_path / "a.png", size=(300, 200)))
     assert cache.get_or_create(item).exists()
+
+
+def test_concurrent_get_or_create_for_the_same_item_does_not_raise(tmp_path: Path):
+    """Two ThumbnailJobs can end up requesting the same item at once (e.g. a resort
+    re-requesting the current item while an earlier job for it is still running).
+    Both must return the cache path without either raising -- they must not race on
+    the same '.part.jpg' temp file."""
+    import threading
+
+    cache = ThumbnailCache(tmp_path / "cache")
+    item = _item(make_jpeg(tmp_path / "a.jpg", size=(500, 500)))
+
+    results: list[Path] = []
+    errors: list[BaseException] = []
+
+    def worker():
+        try:
+            results.append(cache.get_or_create(item))
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == []
+    assert len(results) == 4
+    assert all(p == cache.cache_path(item) for p in results)
+    assert all(p.exists() for p in results)
+    assert not any(tmp_path.joinpath("cache").glob("*.part.jpg"))
