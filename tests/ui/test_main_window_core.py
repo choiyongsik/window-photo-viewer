@@ -361,3 +361,19 @@ def test_open_missing_folder_reports_error(win, tmp_path, qtbot):
     with qtbot.waitSignal(win.signals.scan_failed, timeout=5000):
         win.open_folder(tmp_path / "nope")
     qtbot.waitUntil(lambda: "nope" in win.statusBar().currentMessage(), timeout=2000)
+
+
+def test_comma_and_period_seek_video_only_when_video_is_showing(win, folder, qtbot, monkeypatch):
+    win.load_items(_items(folder), folder)
+    assert win.content_stack.currentWidget() is win.video
+    seeks: list[int] = []
+    monkeypatch.setattr(win.video, "seek_by", lambda ms: seeks.append(ms))
+    qtbot.keyClick(win, Qt.Key.Key_Comma)
+    qtbot.keyClick(win, Qt.Key.Key_Period)
+    assert seeks == [-5000, 5000]
+    assert win.current == 0
+
+    win.next_item()  # image now showing — keys must not seek
+    qtbot.keyClick(win, Qt.Key.Key_Comma)
+    qtbot.keyClick(win, Qt.Key.Key_Period)
+    assert seeks == [-5000, 5000]

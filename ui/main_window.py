@@ -16,7 +16,7 @@ from ui.image_cache import ImageCache
 from ui.loupe_view import LoupeView
 from ui.media_list_model import MediaListModel
 from ui.thumb_views import Filmstrip, GridView
-from ui.video_view import VideoView
+from ui.video_view import SEEK_STEP_MS, VideoView
 from ui.workers import ImageLoadJob, MetadataWriteJob, ScanJob, ThumbnailJob, WorkerSignals
 
 PRELOAD_OFFSETS = (1, -1, 2, -2)
@@ -625,8 +625,11 @@ class MainWindow(QMainWindow):
             event.accept()
             return
 
-        if key == Qt.Key.Key_Space and self.content_stack.currentWidget() is self.video and not self.is_grid:
+        video_showing = self.content_stack.currentWidget() is self.video and not self.is_grid
+        if key == Qt.Key.Key_Space and video_showing:
             self.video.toggle_play()
+        elif key in (Qt.Key.Key_Comma, Qt.Key.Key_Period) and video_showing:
+            self.video.seek_by(-SEEK_STEP_MS if key == Qt.Key.Key_Comma else SEEK_STEP_MS)
         elif key in (Qt.Key.Key_Right, Qt.Key.Key_Space):
             self.next_item()
         elif key in (Qt.Key.Key_Left, Qt.Key.Key_Backspace):
