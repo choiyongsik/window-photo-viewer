@@ -5,7 +5,7 @@ import pytest
 
 from core.models import MediaKind
 from core.scanner import natural_key, scan
-from tests.helpers import make_jpeg
+from tests.helpers import make_jpeg, make_png
 
 
 def test_natural_key_orders_numbers_numerically():
@@ -16,6 +16,7 @@ def test_natural_key_orders_numbers_numerically():
 def test_scan_filters_extensions_and_sorts(tmp_path: Path):
     make_jpeg(tmp_path / "IMG_10.jpg")
     make_jpeg(tmp_path / "IMG_2.JPEG")
+    make_png(tmp_path / "IMG_3.PNG")
     (tmp_path / "clip.MP4").write_bytes(b"\x00" * 10)
     (tmp_path / "notes.txt").write_text("x")
     (tmp_path / "IMG_2.xmp").write_text("<x/>")
@@ -24,8 +25,8 @@ def test_scan_filters_extensions_and_sorts(tmp_path: Path):
 
     items = scan(tmp_path)
 
-    assert [i.path.name for i in items] == ["clip.MP4", "IMG_2.JPEG", "IMG_10.jpg"]
-    assert [i.kind for i in items] == [MediaKind.VIDEO, MediaKind.IMAGE, MediaKind.IMAGE]
+    assert [i.path.name for i in items] == ["clip.MP4", "IMG_2.JPEG", "IMG_3.PNG", "IMG_10.jpg"]
+    assert [i.kind for i in items] == [MediaKind.VIDEO, MediaKind.IMAGE, MediaKind.IMAGE, MediaKind.IMAGE]
     assert all(i.rating == 0 and i.exif is None for i in items)
     assert items[1].size == (tmp_path / "IMG_2.JPEG").stat().st_size
     assert items[1].mtime == (tmp_path / "IMG_2.JPEG").stat().st_mtime

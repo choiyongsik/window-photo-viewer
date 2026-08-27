@@ -16,7 +16,7 @@ from core.thumbnails import (
     make_image_thumbnail,
     make_video_thumbnail,
 )
-from tests.helpers import make_jpeg, make_video
+from tests.helpers import make_jpeg, make_png, make_video
 
 
 def _item(path: Path, kind: MediaKind = MediaKind.IMAGE) -> MediaItem:
@@ -135,3 +135,19 @@ def test_video_thumbnail_missing_package_raises_thumbnail_error(tmp_path: Path, 
     monkeypatch.setitem(sys.modules, "imageio_ffmpeg", None)
     with pytest.raises(ThumbnailError):
         make_video_thumbnail(tmp_path / "whatever.mp4", tmp_path / "t.jpg")
+
+
+def test_png_thumbnail_longest_side_256_and_alpha_flattened(tmp_path: Path):
+    src = make_png(tmp_path / "a.png", size=(600, 1200), alpha=True)
+    dst = tmp_path / "t.jpg"
+    make_image_thumbnail(src, dst)
+    with Image.open(dst) as im:
+        assert im.size == (128, 256)
+        assert im.format == "JPEG"
+        assert im.mode == "RGB"
+
+
+def test_cache_generates_png_thumbnail(tmp_path: Path):
+    cache = ThumbnailCache(tmp_path / "cache")
+    item = _item(make_png(tmp_path / "a.png", size=(300, 200)))
+    assert cache.get_or_create(item).exists()

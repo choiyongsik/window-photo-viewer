@@ -8,7 +8,9 @@ def test_kind_for_extensions_case_insensitive():
     assert kind_for(Path("a.jpeg")) is MediaKind.IMAGE
     assert kind_for(Path("a.MOV")) is MediaKind.VIDEO
     assert kind_for(Path("a.mp4")) is MediaKind.VIDEO
-    assert kind_for(Path("a.png")) is None
+    assert kind_for(Path("a.png")) is MediaKind.IMAGE
+    assert kind_for(Path("a.PNG")) is MediaKind.IMAGE
+    assert kind_for(Path("a.gif")) is None
     assert kind_for(Path("a.xmp")) is None
 
 

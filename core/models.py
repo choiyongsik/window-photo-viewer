@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
-IMAGE_EXTENSIONS: frozenset[str] = frozenset({".jpg", ".jpeg"})
+IMAGE_EXTENSIONS: frozenset[str] = frozenset({".jpg", ".jpeg", ".png"})
 VIDEO_EXTENSIONS: frozenset[str] = frozenset({".mp4", ".mov"})
 
 

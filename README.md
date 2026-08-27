@@ -1,7 +1,8 @@
 # Photo Culling Viewer
 
-촬영 직후 JPEG 폴더를 키보드로 훑으며 별점을 매기는 Windows 뷰어.
-별점·색 라벨은 **JPEG 내장 XMP**(`xmp:Rating`, `xmp:Label`)에 기록되어 Lightroom Classic 임포트 시 그대로 읽힌다.
+촬영 직후 JPEG/PNG 폴더를 키보드로 훑으며 별점을 매기는 Windows 뷰어.
+지원 포맷: `.jpg` `.jpeg` `.png` 이미지, `.mp4` `.mov` 영상.
+별점·색 라벨은 **이미지 내장 XMP**(`xmp:Rating`, `xmp:Label`)에 기록되어 Lightroom Classic 임포트 시 그대로 읽힌다.
 
 ## 실행
 
@@ -42,7 +43,7 @@ python app.py D:\Photos\2026-08-27
 
 ## 파일에 미치는 영향
 
-- JPEG: XMP 패킷만 교체한다. 픽셀 데이터와 EXIF는 그대로. 임시 파일에 쓴 뒤 원자적으로 교체하므로 중간에 꺼져도 원본이 깨지지 않는다. 파일 수정 시각은 갱신된다.
+- JPEG/PNG: XMP 패킷(PNG는 iTXt 청크)만 교체한다. 픽셀 데이터와 EXIF는 그대로. 임시 파일에 쓴 뒤 원자적으로 교체하므로 중간에 꺼져도 원본이 깨지지 않는다. 파일 수정 시각은 갱신된다.
 - 썸네일 캐시: `%LOCALAPPDATA%\WindowPhotoViewer\thumbs\` — 지워도 다시 생성된다.
 
 ## 배포 빌드

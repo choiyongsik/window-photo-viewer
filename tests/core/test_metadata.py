@@ -20,7 +20,7 @@ from core.metadata import (
     write_rating_label,
 )
 from core.models import Label, MediaItem, MediaKind
-from tests.helpers import make_jpeg, scan_segment
+from tests.helpers import idat_bytes, make_jpeg, make_png, scan_segment
 
 
 def _make_jpeg_with_exif(path: Path) -> Path:
@@ -251,3 +251,21 @@ def test_populate_fills_item(tmp_path: Path):
     vitem = MediaItem(path=v, kind=MediaKind.VIDEO, mtime=0.0, size=1)
     populate(vitem)
     assert vitem.exif is None and vitem.rating == 0
+
+
+def test_png_roundtrip_keeps_pixel_data(tmp_path: Path):
+    p = make_png(tmp_path / "a.png", size=(40, 30))
+    assert read_rating_label(p, MediaKind.IMAGE) == (0, Label.NONE)
+    before = p.read_bytes()
+
+    write_rating_label(p, MediaKind.IMAGE, 4, Label.GREEN)
+    after = p.read_bytes()
+
+    assert read_rating_label(p, MediaKind.IMAGE) == (4, Label.GREEN)
+    assert idat_bytes(before) == idat_bytes(after)
+    assert not (tmp_path / "a.png.tmp").exists()
+    assert not (tmp_path / "a.xmp").exists()
+
+    write_rating_label(p, MediaKind.IMAGE, 0, Label.NONE)
+    assert read_rating_label(p, MediaKind.IMAGE) == (0, Label.NONE)
+    assert idat_bytes(before) == idat_bytes(p.read_bytes())
