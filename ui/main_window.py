@@ -3,9 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import QSettings, Qt, QThreadPool
-from PySide6.QtGui import QImage, QKeyEvent, QPixmap
-from PySide6.QtWidgets import QLabel, QMainWindow, QMessageBox, QStackedWidget, QVBoxLayout, QWidget
+from PySide6.QtGui import QAction, QImage, QKeyEvent, QKeySequence, QPixmap
+from PySide6.QtWidgets import (
+    QFileDialog, QLabel, QMainWindow, QMessageBox, QStackedWidget, QVBoxLayout, QWidget,
+)
 
+from core.filters import NO_FILTER, Filter
 from core.models import Label, MediaItem, MediaKind
 from core.thumbnails import ThumbnailCache, default_cache_dir
 from ui.image_cache import ImageCache
@@ -67,6 +70,7 @@ class MainWindow(QMainWindow):
         self.scan_pool.setMaxThreadCount(1)
 
         self._build_ui()
+        self._build_menu()
         self._set_current(-1)
 
     # ---------------- UI ----------------
@@ -94,6 +98,7 @@ class MainWindow(QMainWindow):
         self.grid = GridView()
         self.grid.setModel(self.model)
         self.grid.row_activated.connect(self._on_row_activated)
+        self.grid.row_double_clicked.connect(self._on_grid_double_clicked)
 
         self.mode_stack = QStackedWidget()
         self.mode_stack.addWidget(self.loupe_page)
@@ -107,6 +112,21 @@ class MainWindow(QMainWindow):
         root.addWidget(self.mode_stack, 1)
         self.setCentralWidget(central)
         self.statusBar()
+
+    def _build_menu(self) -> None:
+        file_menu = self.menuBar().addMenu("파일(&F)")
+        open_action = QAction("폴더 열기…", self)
+        open_action.setShortcut(QKeySequence("Ctrl+O"))
+        open_action.triggered.connect(self.choose_folder)
+        file_menu.addAction(open_action)
+
+        view_menu = self.menuBar().addMenu("보기(&V)")
+        self.auto_advance_action = QAction("별점 후 자동 다음", self)
+        self.auto_advance_action.setCheckable(True)
+        self.auto_advance_action.setChecked(self.auto_advance)
+        self.auto_advance_action.setShortcut(QKeySequence("Ctrl+Shift+A"))
+        self.auto_advance_action.toggled.connect(lambda on: setattr(self, "auto_advance", on))
+        view_menu.addAction(self.auto_advance_action)
 
     # ---------------- loading ----------------
     def load_items(self, items: list[MediaItem], folder: Path | None) -> None:
@@ -130,6 +150,8 @@ class MainWindow(QMainWindow):
         if self._closing:
             return
         self.load_items(items, self._loading_folder)
+        if self._loading_folder is not None:
+            self.settings.setValue("last_folder", str(self._loading_folder))
 
     def _on_scan_failed(self, message: str) -> None:
         if self._closing:
@@ -141,6 +163,27 @@ class MainWindow(QMainWindow):
         if not self.suppress_dialogs:
             QMessageBox.warning(self, "오류", message)
 
+    # ---------------- settings ----------------
+    @property
+    def auto_advance(self) -> bool:
+        return bool(self.settings.value("auto_advance", False, type=bool))
+
+    @auto_advance.setter
+    def auto_advance(self, on: bool) -> None:
+        self.settings.setValue("auto_advance", bool(on))
+        if hasattr(self, "auto_advance_action") and self.auto_advance_action.isChecked() != bool(on):
+            self.auto_advance_action.setChecked(bool(on))
+
+    def last_folder(self) -> Path | None:
+        value = self.settings.value("last_folder", "", type=str)
+        return Path(value) if value else None
+
+    def choose_folder(self) -> None:
+        start = str(self.last_folder() or Path.home())
+        chosen = QFileDialog.getExistingDirectory(self, "사진 폴더 선택", start)
+        if chosen:
+            self.open_folder(Path(chosen))
+
     # ---------------- lookup helpers ----------------
     def _index_of(self, item: MediaItem) -> int:
         return self._index_by_id.get(id(item), -1)
@@ -150,7 +193,54 @@ class MainWindow(QMainWindow):
         return items[self.current] if 0 <= self.current < len(items) else None
 
     def _active_view(self):
-        return self.filmstrip
+        return self.grid if self.is_grid else self.filmstrip
+
+    # ---------------- modes ----------------
+    @property
+    def is_grid(self) -> bool:
+        return self.mode_stack.currentWidget() is self.grid
+
+    def show_grid(self) -> None:
+        self.video.stop()
+        self.mode_stack.setCurrentWidget(self.grid)
+        row = self.model.row_for_item_index(self.current)
+        if row >= 0:
+            self.grid.set_current_row(row)
+        self._request_thumbnails(self._priority_order())
+
+    def show_loupe(self) -> None:
+        self.mode_stack.setCurrentWidget(self.loupe_page)
+        self._show_current()
+
+    def _on_grid_double_clicked(self, row: int) -> None:
+        self._on_row_activated(row)
+        self.show_loupe()
+
+    def toggle_fullscreen(self) -> None:
+        if self.isFullScreen():
+            self.showNormal()
+        else:
+            self.showFullScreen()
+
+    # ---------------- filter ----------------
+    def set_filter(self, f: Filter) -> None:
+        self.model.set_filter(f)
+        self._reconcile_current_after_filter()
+
+    def clear_filter(self) -> None:
+        self.set_filter(NO_FILTER)
+
+    def _reconcile_current_after_filter(self) -> None:
+        """Keep current if still visible; otherwise move to the next visible item (or the last, or none)."""
+        visible = self.model.visible_indices()
+        if self.current in visible:
+            self._set_current(self.current)   # re-sync views / header
+            return
+        if not visible:
+            self._set_current(-1)
+            return
+        later = [i for i in visible if i > self.current]
+        self._set_current(later[0] if later else visible[-1])
 
     # ---------------- thumbnails ----------------
     def _priority_order(self) -> list[int]:
@@ -182,6 +272,8 @@ class MainWindow(QMainWindow):
             self.model.set_thumbnail(idx, pixmap)
 
     def _on_thumbnail_failed(self, item: MediaItem, _message: str) -> None:
+        if self._closing:
+            return
         idx = self._index_of(item)
         if idx >= 0:
             self.model.set_thumbnail_failed(idx)
@@ -247,12 +339,36 @@ class MainWindow(QMainWindow):
             self.loupe.set_image(image)
 
     def _on_image_failed(self, item: MediaItem, message: str) -> None:
+        if self._closing:
+            return
         idx = self._index_of(item)
         if idx < 0:
             return
         self._pending_images.discard(idx)
+        if not item.path.exists():
+            self._remove_item(idx)
+            return
         if idx == self.current:
             self.loupe.set_placeholder(f"표시할 수 없음\n{item.path.name}\n{message}")
+
+    def _remove_item(self, idx: int) -> None:
+        items = list(self.model.items())
+        removed = items.pop(idx)
+        was_current = self.current
+        keep_filter = self.model.filter()
+        self.image_cache.clear()
+        self._pending_images.clear()
+        self.model.set_items(items)
+        self.model.set_filter(keep_filter)
+        self._index_by_id = {id(it): i for i, it in enumerate(items)}
+        visible = self.model.visible_indices()
+        if not visible:
+            self._set_current(-1)
+        else:
+            candidates = [i for i in visible if i >= min(was_current, len(items) - 1)]
+            self._set_current(candidates[0] if candidates else visible[-1])
+        self._request_thumbnails(self._priority_order())
+        self.statusBar().showMessage(f"파일이 사라져 목록에서 제외: {removed.path.name}", 8000)
 
     def _update_header(self) -> None:
         item = self.current_item()
@@ -334,6 +450,14 @@ class MainWindow(QMainWindow):
         item.write_error = None
         self.model.item_changed(idx)
         self.write_pool.start(MetadataWriteJob(item, self.signals))
+
+        if self.model.filter().is_active and not self.model.filter().matches(item):
+            self.model.refresh_filter()
+            self._reconcile_current_after_filter()
+            return
+        if rating is not None and rating > 0 and self.auto_advance:
+            self.next_item()
+            return
         self._update_header()
 
     def _on_write_finished(self, item: MediaItem, error: str) -> None:
@@ -355,10 +479,24 @@ class MainWindow(QMainWindow):
     # ---------------- keys ----------------
     def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
         key = event.key()
-        if event.modifiers() & (Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.ControlModifier):
-            super().keyPressEvent(event)
+        mods = event.modifiers()
+        if mods & Qt.KeyboardModifier.ControlModifier:
+            super().keyPressEvent(event)   # Ctrl+O / Ctrl+Shift+A are QAction shortcuts
             return
-        if key == Qt.Key.Key_Space and self.content_stack.currentWidget() is self.video:
+        if mods & Qt.KeyboardModifier.AltModifier:
+            if key in _RATING_KEYS:
+                self.set_filter(Filter(min_rating=_RATING_KEYS[key]))
+            elif key == Qt.Key.Key_X:
+                self.set_filter(Filter(rejected_only=True))
+            elif key == Qt.Key.Key_0:
+                self.clear_filter()
+            else:
+                super().keyPressEvent(event)
+                return
+            event.accept()
+            return
+
+        if key == Qt.Key.Key_Space and self.content_stack.currentWidget() is self.video and not self.is_grid:
             self.video.toggle_play()
         elif key in (Qt.Key.Key_Right, Qt.Key.Key_Space):
             self.next_item()
@@ -378,6 +516,14 @@ class MainWindow(QMainWindow):
             self.set_label(_LABEL_KEYS[key])
         elif key == Qt.Key.Key_Z:
             self.loupe.toggle_zoom()
+        elif key == Qt.Key.Key_G:
+            self.show_grid()
+        elif key == Qt.Key.Key_E:
+            self.show_loupe()
+        elif key in (Qt.Key.Key_F, Qt.Key.Key_F11):
+            self.toggle_fullscreen()
+        elif key == Qt.Key.Key_Escape and self.isFullScreen():
+            self.showNormal()
         else:
             super().keyPressEvent(event)
             return
@@ -394,7 +540,10 @@ class MainWindow(QMainWindow):
         # what keeps us safe on timeout — self.signals is unparented (see __init__)
         # specifically so a job that outlives this wait can still emit safely; Qt
         # drops the emit once this window's slots are gone instead of crashing.
-        for pool in (self.scan_pool, self.thumb_pool, self.image_pool, self.write_pool):
+        for pool in (self.scan_pool, self.thumb_pool, self.image_pool):
             pool.clear()
             pool.waitForDone(2000)
+        # write_pool: never clear() — a queued rating write must not be silently
+        # dropped on close. Just give it a couple seconds to finish.
+        self.write_pool.waitForDone(2000)
         super().closeEvent(event)
