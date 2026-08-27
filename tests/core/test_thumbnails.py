@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -126,5 +127,11 @@ def test_video_thumbnail_ffmpeg_unavailable_raises_thumbnail_error(tmp_path: Pat
         raise RuntimeError("no binary")
 
     monkeypatch.setattr(imageio_ffmpeg, "get_ffmpeg_exe", _boom)
+    with pytest.raises(ThumbnailError):
+        make_video_thumbnail(tmp_path / "whatever.mp4", tmp_path / "t.jpg")
+
+
+def test_video_thumbnail_missing_package_raises_thumbnail_error(tmp_path: Path, monkeypatch):
+    monkeypatch.setitem(sys.modules, "imageio_ffmpeg", None)
     with pytest.raises(ThumbnailError):
         make_video_thumbnail(tmp_path / "whatever.mp4", tmp_path / "t.jpg")

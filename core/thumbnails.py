@@ -36,9 +36,9 @@ def make_image_thumbnail(src: Path, dst: Path, size: int = THUMB_SIZE) -> None:
 
 
 def make_video_thumbnail(src: Path, dst: Path, size: int = THUMB_SIZE) -> None:
-    import imageio_ffmpeg
-
     try:
+        import imageio_ffmpeg
+
         ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
     except Exception as exc:
         raise ThumbnailError(f"{src.name}: ffmpeg unavailable: {exc}") from exc
