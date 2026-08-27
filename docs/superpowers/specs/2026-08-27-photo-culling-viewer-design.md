@@ -43,12 +43,14 @@ window-photo-viewer/
 │   ├── thumbnails.py     # Pillow draft 모드 축소, 영상은 ffmpeg 프레임 추출, 디스크 캐시
 │   └── filters.py        # 별점/라벨/reject 필터 → 인덱스 목록
 ├── ui/                   # PySide6
-│   ├── main_window.py    # 레이아웃, 단축키 바인딩, 모드 전이, 상태 헤더
-│   ├── loupe_view.py     # 단일 이미지 (QGraphicsView) — fit/100% 토글, 드래그 패닝
-│   ├── filmstrip.py      # 하단 썸네일 스트립 + 별점/라벨/영상 아이콘 오버레이
-│   ├── grid_view.py      # 전체 썸네일 그리드 (개요 모드)
-│   ├── video_view.py     # QMediaPlayer + QVideoWidget
-│   └── workers.py        # QThreadPool용 QRunnable: 썸네일 생성, 풀사이즈 프리로드, 메타 쓰기
+│   ├── main_window.py      # 레이아웃, 단축키 바인딩, 모드 전이, 상태 헤더
+│   ├── loupe_view.py       # 단일 이미지 (QGraphicsView) — fit/100% 토글, 드래그 패닝
+│   ├── media_list_model.py # QAbstractListModel: MediaItem 목록 + 필터 + 썸네일 픽스맵
+│   ├── thumb_delegate.py   # 썸네일 셀 페인팅 (별점/라벨/영상/reject/! 오버레이)
+│   ├── thumb_views.py      # Filmstrip(가로 스트립) / GridView(그리드) — 같은 모델·델리게이트 공유
+│   ├── video_view.py       # QMediaPlayer + QVideoWidget
+│   ├── image_cache.py      # 풀사이즈 QImage LRU (최대 6장)
+│   └── workers.py          # QThreadPool용 QRunnable: 스캔, 썸네일, 풀사이즈 프리로드, 메타 쓰기
 ├── app.py                # 진입점
 ├── tests/
 │   ├── core/             # pytest
@@ -136,9 +138,9 @@ class MediaItem:
 | 라벨 | `Xmp.xmp.Label` — `"Red"`, `"Yellow"`, `"Green"`, `"Blue"`. 해제 시 태그 삭제 |
 | 라이브러리 | `pyexiv2` (exiv2 번들, Windows wheel 제공). XMP 패킷만 갱신하므로 픽셀·EXIF 무손상 |
 | 파일 시각 | `mtime`은 갱신되게 둔다 (LR이 메타데이터 변경 감지에 사용) |
-| 안전한 쓰기 | 임시 파일에 복사 → 메타 기록 → `os.replace`로 원자 교체 |
-| 읽기 | 기존 `Xmp.xmp.Rating`/`Label`을 로드 시 표시. LR에서 이미 별점 매긴 폴더도 일관 |
-| 영상 | `.mp4`/`.mov`에도 같은 방식으로 기록 시도 (exiv2가 지원). LR의 영상 XMP 반영은 제한적임을 사용자 문서에 명시 |
+| 안전한 쓰기 | 파일 바이트를 읽어 `pyexiv2.ImageData`로 메모리에서 XMP 갱신 → 임시 파일(`원본명.tmp`)에 기록 → `os.replace`로 원자 교체. 바이트 기반이므로 한글 경로 인코딩 문제 없음 |
+| 읽기 | 기존 `Xmp.xmp.Rating`/`Label`을 로드 시 표시. LR에서 이미 별점 매긴 폴더도 일관. EXIF 촬영정보는 Pillow `getexif()`로 읽음 |
+| 영상 | exiv2는 MP4/MOV **쓰기를 지원하지 않음**. 영상은 같은 폴더의 사이드카 `영상명.xmp`(확장자 교체, 예 `clip.mp4` → `clip.xmp`)에 표준 XMP 패킷을 직접 기록·읽음. Lightroom Classic은 영상 사이드카를 읽지 않으므로 영상 별점은 뷰어 내부용(및 Bridge/digiKam 등 호환)임을 사용자 문서에 명시 |
 
 ### 5.1 Reject의 의미
 
