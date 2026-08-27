@@ -199,3 +199,18 @@ XMP 스펙상 `Rating=-1`은 "rejected"이지만 **Lightroom Classic은 Pick/Rej
 - 런타임 의존: `PySide6`, `pyexiv2`, `Pillow`, `imageio-ffmpeg`
 - 개발 의존: `pytest`, `pytest-qt`
 - 배포: PyInstaller 단일 폴더(`--onedir`) 빌드. ffmpeg 바이너리와 exiv2 DLL 포함 확인
+
+## 10. 추가 (2026-08-27): 영상 자동 재생, 폴더 패널
+
+### 10.1 영상 자동 재생
+
+- Loupe 모드에서 영상 항목에 도달하면 자동으로 재생을 시작한다 (`MainWindow._show_current`가 `video.load()` 후 `video.play()` 호출; Grid 모드에서는 화면에 보이지 않으므로 재생하지 않는다 — Grid에서 Loupe로 전환하며 영상 위에 서면 그때 재생 시작).
+- 재생이 끝(`QMediaPlayer.MediaStatus.EndOfMedia`)에 도달하면 위치를 처음으로 되감고(`setPosition(0)`) 일시정지한다 — 첫 프레임을 보여준 채로 대기하며, `Space` 또는 클릭으로 다시 재생할 수 있다. `player.setLoops(1)`로 자동 반복은 명시적으로 끈다.
+- `Space`는 기존과 동일하게 영상이 표시 중일 때 재생/일시정지를 토글한다. 영상 위를 좌클릭해도 동일하게 토글된다 (`VideoView.mousePressEvent`; 내부 `QVideoWidget`은 `WA_TransparentForMouseEvents`로 클릭을 부모에 넘긴다).
+
+### 10.2 좌측 폴더 패널
+
+- 창 왼쪽에 `FolderPanel`이 `QSplitter`로 본문과 나란히 배치된다. 현재 폴더의 형제 폴더들(`folder.parent`의 하위 디렉터리, 현재 폴더 포함)을 자연 정렬로 나열하고, 각 행에 이미지·영상 개수를 보여준다. 숨김 폴더(`.`으로 시작하거나 Windows 숨김 속성)는 제외된다.
+- 목록의 항목을 클릭하면 그 폴더를 연다 (`folder_activated` 시그널 → `MainWindow.open_folder`). 현재 폴더를 클릭하는 것은 아무 동작도 하지 않는다.
+- `PgUp` / `PgDn` 키로 형제 폴더 사이를 앞뒤로 이동한다 (`MainWindow.prev_folder` / `next_folder`). 양쪽 끝에서는 아무 동작도 하지 않는다.
+- `Ctrl+B` (메뉴 보기 → "폴더 패널")로 패널을 표시/숨김 전환한다. 이 설정은 `QSettings`의 `folder_panel_visible` 키로 저장되어 다음 실행에도 유지된다 (기본값: 표시).

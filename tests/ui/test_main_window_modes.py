@@ -30,6 +30,15 @@ def _items(folder: Path):
 
 
 @pytest.fixture
+def siblings(tmp_path: Path) -> Path:
+    root = tmp_path / "root"
+    for name in ("A", "B", "C"):
+        for i in range(2):
+            make_jpeg(root / name / f"{name}_{i}.jpg", size=(80, 60))
+    return root
+
+
+@pytest.fixture
 def win(qtbot, tmp_path: Path):
     settings = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
     w = MainWindow(thumb_cache=ThumbnailCache(tmp_path / "cache"), settings=settings)
@@ -193,3 +202,52 @@ def test_thumbnail_priority_uses_active_view(win, folder):
     assert win._active_view() is win.grid
     win.show_loupe()
     assert win._active_view() is win.filmstrip
+
+
+def test_pagedown_opens_next_sibling_folder(win, siblings, qtbot):
+    win.open_folder(siblings / "A")
+    qtbot.waitUntil(lambda: win.folder == siblings / "A", timeout=5000)
+
+    qtbot.keyClick(win, Qt.Key.Key_PageDown)
+    qtbot.waitUntil(lambda: win.folder == siblings / "B", timeout=5000)
+    assert len(win.model.items()) == 2
+    assert win.folder_panel.current_folder() == siblings / "B"
+
+    qtbot.keyClick(win, Qt.Key.Key_PageUp)
+    qtbot.waitUntil(lambda: win.folder == siblings / "A", timeout=5000)
+
+    qtbot.keyClick(win, Qt.Key.Key_PageUp)   # already first: no-op
+    qtbot.wait(100)
+    assert win.folder == siblings / "A"
+
+    win.open_folder(siblings / "C")
+    qtbot.waitUntil(lambda: win.folder == siblings / "C", timeout=5000)
+    qtbot.keyClick(win, Qt.Key.Key_PageDown)   # already last: no-op
+    qtbot.wait(100)
+    assert win.folder == siblings / "C"
+
+
+def test_folder_panel_click_opens_folder(win, siblings, qtbot):
+    win.open_folder(siblings / "A")
+    qtbot.waitUntil(lambda: win.folder == siblings / "A", timeout=5000)
+
+    win.folder_panel.folder_activated.emit(siblings / "C")
+
+    qtbot.waitUntil(lambda: win.folder == siblings / "C", timeout=5000)
+    assert win.folder_panel.current_folder() == siblings / "C"
+
+
+def test_ctrl_b_toggles_folder_panel_and_persists(win, qtbot):
+    assert win.folder_panel_visible is True
+    assert win.folder_panel.isVisible() is True
+
+    win.toggle_folder_panel()
+
+    assert win.folder_panel_visible is False
+    assert win.folder_panel.isVisible() is False
+    assert win.settings.value("folder_panel_visible", type=bool) is False
+
+    second = MainWindow(thumb_cache=win.thumb_cache, settings=win.settings)
+    qtbot.addWidget(second)
+    assert second.folder_panel_visible is False
+    assert second.folder_panel.isHidden() is True   # applied before the window is ever shown

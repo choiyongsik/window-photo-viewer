@@ -5,12 +5,13 @@ from pathlib import Path
 from PySide6.QtCore import QSettings, Qt, QThreadPool
 from PySide6.QtGui import QAction, QImage, QKeyEvent, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
-    QFileDialog, QLabel, QMainWindow, QMessageBox, QStackedWidget, QVBoxLayout, QWidget,
+    QFileDialog, QLabel, QMainWindow, QMessageBox, QSplitter, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from core.filters import NO_FILTER, Filter
 from core.models import Label, MediaItem, MediaKind
 from core.thumbnails import ThumbnailCache, default_cache_dir
+from ui.folder_panel import FolderPanel
 from ui.image_cache import ImageCache
 from ui.loupe_view import LoupeView
 from ui.media_list_model import MediaListModel
@@ -109,12 +110,23 @@ class MainWindow(QMainWindow):
         self.mode_stack.addWidget(self.loupe_page)
         self.mode_stack.addWidget(self.grid)
 
+        self.folder_panel = FolderPanel()
+        self.folder_panel.folder_activated.connect(self.open_folder)
+        self.folder_panel.setVisible(self.folder_panel_visible)
+
+        self.splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.splitter.addWidget(self.folder_panel)
+        self.splitter.addWidget(self.mode_stack)
+        self.splitter.setStretchFactor(0, 0)
+        self.splitter.setStretchFactor(1, 1)
+        self.splitter.setChildrenCollapsible(False)
+
         central = QWidget()
         root = QVBoxLayout(central)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
         root.addWidget(self.header, 0)
-        root.addWidget(self.mode_stack, 1)
+        root.addWidget(self.splitter, 1)
         self.setCentralWidget(central)
         self.statusBar()
 
@@ -133,6 +145,13 @@ class MainWindow(QMainWindow):
         self.auto_advance_action.toggled.connect(lambda on: setattr(self, "auto_advance", on))
         view_menu.addAction(self.auto_advance_action)
 
+        self.folder_panel_action = QAction("폴더 패널", self)
+        self.folder_panel_action.setCheckable(True)
+        self.folder_panel_action.setChecked(self.folder_panel_visible)
+        self.folder_panel_action.setShortcut(QKeySequence("Ctrl+B"))
+        self.folder_panel_action.toggled.connect(lambda on: setattr(self, "folder_panel_visible", on))
+        view_menu.addAction(self.folder_panel_action)
+
     # ---------------- loading ----------------
     def load_items(self, items: list[MediaItem], folder: Path | None) -> None:
         # Drop work queued for the folder we are leaving: its thumbnails and decodes
@@ -142,6 +161,7 @@ class MainWindow(QMainWindow):
         self.thumb_pool.clear()
         self.image_pool.clear()
         self.folder = folder
+        self.folder_panel.set_folder(folder)
         self.video.stop()
         self.image_cache.clear()
         self._pending_images.clear()
@@ -186,6 +206,18 @@ class MainWindow(QMainWindow):
         self.settings.setValue("auto_advance", bool(on))
         if hasattr(self, "auto_advance_action") and self.auto_advance_action.isChecked() != bool(on):
             self.auto_advance_action.setChecked(bool(on))
+
+    @property
+    def folder_panel_visible(self) -> bool:
+        return bool(self.settings.value("folder_panel_visible", True, type=bool))
+
+    @folder_panel_visible.setter
+    def folder_panel_visible(self, on: bool) -> None:
+        self.settings.setValue("folder_panel_visible", bool(on))
+        if hasattr(self, "folder_panel"):
+            self.folder_panel.setVisible(bool(on))
+        if hasattr(self, "folder_panel_action") and self.folder_panel_action.isChecked() != bool(on):
+            self.folder_panel_action.setChecked(bool(on))
 
     def last_folder(self) -> Path | None:
         value = self.settings.value("last_folder", "", type=str)
@@ -469,6 +501,19 @@ class MainWindow(QMainWindow):
         if visible:
             self._set_current(visible[-1])
 
+    def next_folder(self) -> None:
+        p = self.folder_panel.next_folder()
+        if p:
+            self.open_folder(p)
+
+    def prev_folder(self) -> None:
+        p = self.folder_panel.prev_folder()
+        if p:
+            self.open_folder(p)
+
+    def toggle_folder_panel(self) -> None:
+        self.folder_panel_visible = not self.folder_panel.isVisible()
+
     def _on_row_activated(self, row: int) -> None:
         if 0 <= row < self.model.rowCount():
             self._set_current(self.model.item_index_at_row(row))
@@ -586,6 +631,10 @@ class MainWindow(QMainWindow):
             self.first_item()
         elif key == Qt.Key.Key_End:
             self.last_item()
+        elif key == Qt.Key.Key_PageDown:
+            self.next_folder()
+        elif key == Qt.Key.Key_PageUp:
+            self.prev_folder()
         elif key in _RATING_KEYS:
             self.set_rating(_RATING_KEYS[key])
         elif key == Qt.Key.Key_0:
