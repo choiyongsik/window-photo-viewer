@@ -38,8 +38,17 @@ class MainWindow(QMainWindow):
         self.current: int = -1
         self._pending_images: set[int] = set()
         self._index_by_id: dict[int, int] = {}
+        self._closing = False
 
-        self.signals = WorkerSignals(self)
+        # Deliberately unparented: worker-thread jobs (ThumbnailJob/ImageLoadJob/
+        # MetadataWriteJob/ScanJob) hold this object and emit to it from other threads.
+        # A job may still be running when the window closes; if signals were a child
+        # QObject it would be destroyed with the window and a late emit would crash
+        # ("Signal source has been deleted"). Left unparented, it stays alive as long
+        # as any job references it, and Qt auto-disconnects its queued connections to
+        # this window's slots once the window itself is destroyed — so a late emit is
+        # simply dropped instead of crashing.
+        self.signals = WorkerSignals()
         self.signals.scan_finished.connect(self._on_scan_finished)
         self.signals.scan_failed.connect(self._on_scan_failed)
         self.signals.thumbnail_ready.connect(self._on_thumbnail_ready)
@@ -118,9 +127,13 @@ class MainWindow(QMainWindow):
         self.scan_pool.start(ScanJob(folder, self.signals))
 
     def _on_scan_finished(self, items: list[MediaItem]) -> None:
+        if self._closing:
+            return
         self.load_items(items, self._loading_folder)
 
     def _on_scan_failed(self, message: str) -> None:
+        if self._closing:
+            return
         self._show_error(f"폴더를 열 수 없습니다: {message}")
 
     def _show_error(self, message: str) -> None:
@@ -157,6 +170,8 @@ class MainWindow(QMainWindow):
             self.thumb_pool.start(ThumbnailJob(items[idx], self.thumb_cache, self.signals))
 
     def _on_thumbnail_ready(self, item: MediaItem, path: str) -> None:
+        if self._closing:
+            return
         idx = self._index_of(item)
         if idx < 0:
             return
@@ -221,6 +236,8 @@ class MainWindow(QMainWindow):
                 self._request_image(visible[p])
 
     def _on_image_ready(self, item: MediaItem, image: QImage) -> None:
+        if self._closing:
+            return
         idx = self._index_of(item)
         if idx < 0:
             return
@@ -309,7 +326,7 @@ class MainWindow(QMainWindow):
         self._apply_change(item, label=Label.NONE if item.label is label else label)
 
     def _apply_change(self, item: MediaItem, *, rating: int | None = None, label: Label | None = None) -> None:
-        idx = self.current
+        idx = self._index_of(item)
         if rating is not None:
             item.rating = rating
         if label is not None:
@@ -320,6 +337,8 @@ class MainWindow(QMainWindow):
         self._update_header()
 
     def _on_write_finished(self, item: MediaItem, error: str) -> None:
+        if self._closing:
+            return
         idx = self._index_of(item)
         if idx < 0:
             return
@@ -366,11 +385,16 @@ class MainWindow(QMainWindow):
 
     # ---------------- lifecycle ----------------
     def closeEvent(self, event) -> None:  # noqa: N802
-        # Background QRunnables (thumbnail/image/write/scan jobs) hold a reference to
-        # self.signals (a child QObject) and emit to it from worker threads. If the
-        # window is destroyed while a job is still in flight, that emit targets an
-        # already-deleted QObject. Block close until every pool has drained so no job
-        # outlives the window it reports back to.
+        # Stop reacting to results before draining: a ScanJob/ThumbnailJob/etc. that
+        # finishes while we're waiting below must not re-queue more work on a window
+        # that is on its way out (see the _closing guards on the _on_* handlers).
+        self._closing = True
+        # Best-effort quick drain for a responsive close: drop anything not yet
+        # started and give running jobs a couple seconds to wrap up. This is not
+        # what keeps us safe on timeout — self.signals is unparented (see __init__)
+        # specifically so a job that outlives this wait can still emit safely; Qt
+        # drops the emit once this window's slots are gone instead of crashing.
         for pool in (self.scan_pool, self.thumb_pool, self.image_pool, self.write_pool):
-            pool.waitForDone(5000)
+            pool.clear()
+            pool.waitForDone(2000)
         super().closeEvent(event)

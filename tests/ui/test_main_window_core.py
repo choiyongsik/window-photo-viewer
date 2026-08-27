@@ -78,11 +78,18 @@ def test_navigation_keys_and_bounds(win, folder, qtbot):
     assert win.grid.current_row() == 0
 
 
-def test_video_item_shows_video_view_and_space_toggles_play(win, folder):
+def test_video_item_shows_video_view_and_space_toggles_play(win, folder, qtbot, monkeypatch):
     win.load_items(_items(folder), folder)
     assert win.current_item().kind is MediaKind.VIDEO
     assert win.content_stack.currentWidget() is win.video
     assert win.video.source_path() == folder / "clip.mp4"
+
+    calls = []
+    monkeypatch.setattr(win.video, "toggle_play", lambda: calls.append(1))
+    qtbot.keyClick(win, Qt.Key.Key_Space)
+    assert calls == [1]
+    assert win.current == 0  # Space toggled play, it did not advance
+
     win.next_item()
     assert win.content_stack.currentWidget() is win.loupe
 
