@@ -216,14 +216,14 @@ def test_pagedown_opens_next_sibling_folder(win, siblings, qtbot):
     qtbot.keyClick(win, Qt.Key.Key_PageUp)
     qtbot.waitUntil(lambda: win.folder == siblings / "A", timeout=5000)
 
-    qtbot.keyClick(win, Qt.Key.Key_PageUp)   # already first: no-op
-    qtbot.wait(100)
+    assert win.folder_panel.prev_folder() is None   # already first
+    qtbot.keyClick(win, Qt.Key.Key_PageUp)   # no-op
     assert win.folder == siblings / "A"
 
     win.open_folder(siblings / "C")
     qtbot.waitUntil(lambda: win.folder == siblings / "C", timeout=5000)
-    qtbot.keyClick(win, Qt.Key.Key_PageDown)   # already last: no-op
-    qtbot.wait(100)
+    assert win.folder_panel.next_folder() is None   # already last
+    qtbot.keyClick(win, Qt.Key.Key_PageDown)   # no-op
     assert win.folder == siblings / "C"
 
 

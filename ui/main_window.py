@@ -112,7 +112,6 @@ class MainWindow(QMainWindow):
 
         self.folder_panel = FolderPanel()
         self.folder_panel.folder_activated.connect(self.open_folder)
-        self.folder_panel.setVisible(self.folder_panel_visible)
 
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
         self.splitter.addWidget(self.folder_panel)
@@ -129,6 +128,11 @@ class MainWindow(QMainWindow):
         root.addWidget(self.splitter, 1)
         self.setCentralWidget(central)
         self.statusBar()
+
+        # Applied last, after folder_panel is already parented into the splitter/
+        # layout — calling setVisible() on it before that made it a stray top-level
+        # window for one frame (a startup flash) whenever the saved state was visible.
+        self.folder_panel.setVisible(self.folder_panel_visible)
 
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu("파일(&F)")
@@ -512,7 +516,7 @@ class MainWindow(QMainWindow):
             self.open_folder(p)
 
     def toggle_folder_panel(self) -> None:
-        self.folder_panel_visible = not self.folder_panel.isVisible()
+        self.folder_panel_visible = not self.folder_panel_visible
 
     def _on_row_activated(self, row: int) -> None:
         if 0 <= row < self.model.rowCount():
