@@ -26,6 +26,23 @@ NO_ITEMS_TEXT = "이 폴더에 사진이 없습니다"
 NO_MATCH_TEXT = "필터에 맞는 항목이 없습니다 (Alt+0: 필터 해제)"
 _RATING_KEYS = {Qt.Key.Key_1: 1, Qt.Key.Key_2: 2, Qt.Key.Key_3: 3, Qt.Key.Key_4: 4, Qt.Key.Key_5: 5}
 _LABEL_KEYS = {Qt.Key.Key_6: Label.RED, Qt.Key.Key_7: Label.YELLOW, Qt.Key.Key_8: Label.GREEN, Qt.Key.Key_9: Label.BLUE}
+# VK_1..VK_5 (Windows virtual-key codes for the top-row digit keys).
+_VK_DIGITS = {0x31: 1, 0x32: 2, 0x33: 3, 0x34: 4, 0x35: 5}
+
+
+def _digit_from_event(event: QKeyEvent) -> int | None:
+    """The 1..5 digit an Alt+Shift+<digit> press means.
+
+    With Shift held, Qt normally reports the shifted symbol (Key_Exclam, Key_At, …)
+    instead of Key_1..Key_5 on a US layout — but the offscreen platform used in tests
+    delivers plain Key_1..Key_5 even with Shift, so event.key() is checked first (this
+    is the path the automated tests exercise). nativeVirtualKey() is the fallback for
+    real keyboards where Shift does remap the key.
+    """
+    key = event.key()
+    if key in _RATING_KEYS:
+        return _RATING_KEYS[key]
+    return _VK_DIGITS.get(event.nativeVirtualKey())
 
 
 class MainWindow(QMainWindow):
@@ -657,7 +674,10 @@ class MainWindow(QMainWindow):
             super().keyPressEvent(event)   # Ctrl+O / Ctrl+Shift+A are QAction shortcuts
             return
         if mods & Qt.KeyboardModifier.AltModifier:
-            if key in _RATING_KEYS:
+            digit = _digit_from_event(event)
+            if mods & Qt.KeyboardModifier.ShiftModifier and digit is not None:
+                self.set_filter(Filter(exact_rating=digit))
+            elif key in _RATING_KEYS:
                 self.set_filter(Filter(min_rating=_RATING_KEYS[key]))
             elif key == Qt.Key.Key_X:
                 self.set_filter(Filter(rejected_only=True))

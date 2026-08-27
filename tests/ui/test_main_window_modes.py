@@ -322,3 +322,24 @@ def test_new_window_starts_in_saved_sort_mode(win, mtime_folder, qtbot):
     second = MainWindow(thumb_cache=win.thumb_cache, settings=win.settings)
     qtbot.addWidget(second)
     assert second.sort_mode is SortMode.CAPTURE_DESC
+
+
+def test_alt_shift_digit_filters_to_exact_rating(win, folder, qtbot):
+    win.load_items(_items(folder), folder)          # ratings: 0,3,5,-1,2
+    # offscreen delivers Key_3 with Shift held (not Key_Exclam), which is what the
+    # event.key() branch of _digit_from_event exercises; the nativeVirtualKey()
+    # fallback exists for real keyboards where Shift remaps the key.
+    qtbot.keyClick(win, Qt.Key.Key_3, Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.ShiftModifier)
+    assert win.model.visible_indices() == [1]        # only the exact 3★ item
+    assert "filter: ★3" in win.header.text()
+
+
+def test_alt_shift_digit_is_distinct_from_alt_digit(win, folder, qtbot):
+    win.load_items(_items(folder), folder)           # ratings: 0,3,5,-1,2
+    qtbot.keyClick(win, Qt.Key.Key_2, Qt.KeyboardModifier.AltModifier)   # min_rating=2 -> [1,2,4]
+    assert win.model.visible_indices() == [1, 2, 4]
+    assert "★2+" in win.header.text()
+
+    qtbot.keyClick(win, Qt.Key.Key_2, Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.ShiftModifier)
+    assert win.model.visible_indices() == [4]         # exact 2★ item only
+    assert "filter: ★2" in win.header.text() and "★2+" not in win.header.text()
