@@ -218,3 +218,13 @@ XMP 스펙상 `Rating=-1`은 "rejected"이지만 **Lightroom Classic은 Pick/Rej
 ### 10.3 영상 컨트롤 바 (2026-08-27 추가)
 
 영상 화면 아래 32px 컨트롤 바: `▶/❚❚` 버튼, 클릭·드래그로 탐색하는 슬라이더(드래그 중에는 재생 위치 피드백을 무시), `mm:ss / mm:ss` 시간, 🔊/🔇 음소거. 모든 컨트롤은 포커스를 갖지 않는다. 키 `,`/`.`는 영상 표시 중 5초 뒤/앞 탐색(`SEEK_STEP_MS`), 미디어 길이 범위로 클램프. 영상 화면 클릭만 재생 토글이며 컨트롤 바 빈 영역 클릭은 무시한다.
+
+### 10.4 정렬·정확히-N점 필터·새로고침 (2026-08-27 추가)
+
+**정렬 모드** — `core/sorting.py`의 `SortMode`(Qt 미사용): `NAME_ASC`(파일명 자연 정렬 ↑, 기본값), `CAPTURE_DESC`(촬영일시 ↓ — EXIF `DateTimeOriginal`, 파싱 실패나 값 없음(영상 포함)은 `mtime`로 대체), `MTIME_DESC`(수정시각 ↓). 동률은 항상 파일명 자연 정렬 오름차순으로 2차 정렬한다. 키 `S`로 세 모드를 순환하며, 메뉴 보기 → "정렬" 서브메뉴(배타적 체크 액션 3개)로도 선택할 수 있다. 선택된 모드는 `QSettings`의 `sort_mode` 키(`"name_asc"`/`"capture_desc"`/`"mtime_desc"`)에 저장되어 다음 실행에도 유지된다. `MainWindow`는 스캔 결과를 정렬 전 원본(`_unsorted_items`)으로 보관해 두었다가 정렬 모드가 바뀔 때마다(`_resort`) 그 원본에서 다시 정렬하고, 현재 보던 항목을 경로 기준으로 이어서 선택한다. `NAME_ASC`가 아닐 때만 헤더에 `sort: {설명}`을 표시한다.
+
+**정확히 N점 필터** — `core/filters.py`의 `Filter`에 `exact_rating: int | None` 필드 추가. `matches()` 우선순위: `rejected_only` → `exact_rating`(정확히 일치) → `min_rating`(이상). `Alt+Shift+1`~`Alt+Shift+5`로 지정하며, 기존 `Alt+1`~`Alt+5`(N성 이상)와는 구분된다. Shift가 눌린 상태에서는 US 배열 기준으로 Qt가 `Key_1`~`Key_5` 대신 `Key_Exclam` 등 기호 키를 보고할 수 있어, `MainWindow._digit_from_event`가 `event.key()`(오프스크린 플랫폼이 실제로 보내는 값)를 먼저 확인하고 없으면 `event.nativeVirtualKey()`(VK_1~VK_5)로 한 번 더 확인한다. 헤더에는 `filter: ★N`(이상 필터는 `★N+`)로 표시된다.
+
+**새로고침 (F5) 과 폴더 자동 감시** — `F5`(메뉴 파일 → "새로고침")는 `refresh_folder()`를 호출해 현재 선택 항목의 경로를 기억해 두고(`_restore_path`) 같은 폴더를 다시 스캔한다. 스캔 결과가 돌아왔을 때(`_on_scan_finished`) 그 폴더가 이미 열려 있던 폴더라면: 새 결과의 경로 집합이 현재 모델의 경로 집합과 완전히 같으면 — 화면 갱신 없이 상태 표시줄에 "변경 없음"(2초)만 띄운다. 이는 뷰어 자신이 별점/라벨을 기록할 때 만드는 tmp+rename이 폴더 변경 이벤트를 유발하는 것을 무해하게 흡수하기 위함이다. 경로 집합이 달라졌으면 목록을 갱신하고, `_restore_path`가 새 목록에 있으면 그 항목을 다시 선택한 뒤(없으면 첫 항목), 상태 표시줄에 `"{개수}개 항목 (새로고침)"`을 띄운다.
+
+폴더가 열릴 때마다(`load_items`) `QFileSystemWatcher`(`MainWindow._watcher`)가 감시 경로를 그 폴더 하나로 교체한다. `directoryChanged` 시그널이 오면 700ms 단발 타이머(`_watch_timer`)를 (재)시작하고, 만료되면(`_on_watch_timeout`) `refresh_folder()`를 호출한다 — 여러 변경이 짧은 시간에 몰려도 한 번만 새로고침하기 위한 디바운스. 뷰어 자신의 XMP 쓰기가 이 감시를 다시 촉발하는 것을 막기 위해, 별점/라벨 변경을 시작할 때(`_apply_change`)와 그 쓰기가 끝났을 때(`_on_write_finished`) 모두 `_suppress_watch_until = time.monotonic() + 2.0`을 설정하고, `_on_watch_timeout`은 그 시각 이전이면 새로고침을 건너뛴다 — 위에서 설명한 경로-집합 비교가 이를 보강하는 2차 방어선이다. 창을 닫을 때(`closeEvent`) 타이머를 멈추고 감시 경로를 비운다.

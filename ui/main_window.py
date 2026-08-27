@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, Qt, QThreadPool
+from PySide6.QtCore import QFileSystemWatcher, QSettings, Qt, QThreadPool, QTimer
 from PySide6.QtGui import QAction, QActionGroup, QImage, QKeyEvent, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QFileDialog, QLabel, QMainWindow, QMessageBox, QSplitter, QStackedWidget, QVBoxLayout, QWidget,
@@ -66,6 +67,14 @@ class MainWindow(QMainWindow):
         self._pending_images: dict[int, ImageLoadJob] = {}
         self._index_by_id: dict[int, int] = {}
         self._closing = False
+        self._restore_path: Path | None = None
+        self._suppress_watch_until: float = 0.0
+        self._watcher = QFileSystemWatcher(self)
+        self._watcher.directoryChanged.connect(self._on_directory_changed)
+        self._watch_timer = QTimer(self)
+        self._watch_timer.setSingleShot(True)
+        self._watch_timer.setInterval(700)
+        self._watch_timer.timeout.connect(self._on_watch_timeout)
 
         # Deliberately unparented: worker-thread jobs (ThumbnailJob/ImageLoadJob/
         # MetadataWriteJob/ScanJob) hold this object and emit to it from other threads.
@@ -160,6 +169,11 @@ class MainWindow(QMainWindow):
         open_action.triggered.connect(self.choose_folder)
         file_menu.addAction(open_action)
 
+        refresh_action = QAction("새로고침", self)
+        refresh_action.setShortcut(QKeySequence("F5"))
+        refresh_action.triggered.connect(self.refresh_folder)
+        file_menu.addAction(refresh_action)
+
         view_menu = self.menuBar().addMenu("보기(&V)")
         self.auto_advance_action = QAction("별점 후 자동 다음", self)
         self.auto_advance_action.setCheckable(True)
@@ -204,6 +218,11 @@ class MainWindow(QMainWindow):
         self.image_cache.clear()
         self._pending_images.clear()
         self.model.set_items(sort_items(items, self.sort_mode))
+        watched = self._watcher.directories()
+        if watched:
+            self._watcher.removePaths(watched)
+        if folder is not None:
+            self._watcher.addPath(str(folder))
         self._index_by_id = {id(it): i for i, it in enumerate(self.model.items())}
         visible = self.model.visible_indices()
         self._set_current(visible[0] if visible else -1)
@@ -221,13 +240,53 @@ class MainWindow(QMainWindow):
         # folder the job actually scanned and drop anything the user moved on from.
         if self._closing or folder != self._loading_folder:
             return
+        if folder == self.folder:
+            # A refresh (F5 or the folder watcher) of the folder already open. Our own
+            # XMP writes (tmp+rename) fire the watcher too; if nothing actually changed
+            # on disk, skip the reload so it doesn't disturb scroll position / selection.
+            new_paths = {it.path for it in items}
+            old_paths = {it.path for it in self.model.items()}
+            if new_paths == old_paths:
+                self._restore_path = None
+                self.statusBar().showMessage("변경 없음", 2000)
+                self.settings.setValue("last_folder", str(folder))
+                return
+            self.load_items(items, folder)
+            if self._restore_path is not None:
+                for i, item in enumerate(self.model.items()):
+                    if item.path == self._restore_path:
+                        self._set_current(i)
+                        break
+            self._restore_path = None
+            self.statusBar().showMessage(f"{len(items)}개 항목 (새로고침)", 3000)
+            self.settings.setValue("last_folder", str(folder))
+            return
         self.load_items(items, folder)
         self.settings.setValue("last_folder", str(folder))
+
+    def refresh_folder(self) -> None:
+        if self.folder is None:
+            return
+        current = self.current_item()
+        self._restore_path = current.path if current is not None else None
+        self.open_folder(self.folder)
 
     def _on_scan_failed(self, message: str, folder: Path) -> None:
         if self._closing or folder != self._loading_folder:
             return
         self._show_error(f"폴더를 열 수 없습니다: {message}")
+
+    def _on_directory_changed(self, _path: str) -> None:
+        if self._closing:
+            return
+        self._watch_timer.start()   # (re)start the debounce window; start() restarts if already running
+
+    def _on_watch_timeout(self) -> None:
+        if self._closing:
+            return
+        if time.monotonic() < self._suppress_watch_until:
+            return   # our own XMP write is still within its suppression window
+        self.refresh_folder()
 
     def _show_error(self, message: str) -> None:
         self.statusBar().showMessage(message, 10000)
@@ -625,6 +684,7 @@ class MainWindow(QMainWindow):
             item.label = label
         item.write_error = None
         self.model.item_changed(idx)
+        self._suppress_watch_until = time.monotonic() + 2.0
         self.write_pool.start(MetadataWriteJob(item, self.signals))
 
         if self.model.filter().is_active and not self.model.filter().matches(item):
@@ -644,6 +704,7 @@ class MainWindow(QMainWindow):
             return
         item.write_error = error or None
         self.model.item_changed(idx)
+        self._suppress_watch_until = time.monotonic() + 2.0
         if error:
             self.statusBar().setStyleSheet("color:#ff4040;")
             self.statusBar().showMessage(f"기록 실패: {error}", 15000)
@@ -724,6 +785,8 @@ class MainWindow(QMainWindow):
             self.show_loupe()
         elif key in (Qt.Key.Key_F, Qt.Key.Key_F11):
             self.toggle_fullscreen()
+        elif key == Qt.Key.Key_F5:
+            self.refresh_folder()
         elif key == Qt.Key.Key_Escape and self.isFullScreen():
             self.showNormal()
         else:
@@ -737,6 +800,10 @@ class MainWindow(QMainWindow):
         # finishes while we're waiting below must not re-queue more work on a window
         # that is on its way out (see the _closing guards on the _on_* handlers).
         self._closing = True
+        self._watch_timer.stop()
+        watched = self._watcher.directories()
+        if watched:
+            self._watcher.removePaths(watched)
         # Best-effort quick drain for a responsive close: drop anything not yet
         # started and give running jobs a couple seconds to wrap up. This is not
         # what keeps us safe on timeout — self.signals is unparented (see __init__)

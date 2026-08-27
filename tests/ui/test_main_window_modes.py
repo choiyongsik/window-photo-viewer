@@ -343,3 +343,63 @@ def test_alt_shift_digit_is_distinct_from_alt_digit(win, folder, qtbot):
     qtbot.keyClick(win, Qt.Key.Key_2, Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.ShiftModifier)
     assert win.model.visible_indices() == [4]         # exact 2★ item only
     assert "filter: ★2" in win.header.text() and "★2+" not in win.header.text()
+
+
+def test_f5_refreshes_when_file_added_and_preserves_current(win, folder, qtbot):
+    win.load_items(_items(folder), folder)
+    win._set_current(2)  # IMG_3.jpg
+    current_path = win.current_item().path
+    old_count = len(win.model.items())
+
+    make_jpeg(folder / "IMG_6.jpg", size=(80, 60))
+    qtbot.keyClick(win, Qt.Key.Key_F5)
+
+    qtbot.waitUntil(lambda: len(win.model.items()) == old_count + 1, timeout=5000)
+    assert win.current_item().path == current_path
+
+
+def test_f5_with_no_changes_does_not_reload(win, folder, qtbot, monkeypatch):
+    win.load_items(_items(folder), folder)
+    calls: list[int] = []
+    real = win.load_items
+
+    def wrapper(*a, **k):
+        calls.append(1)
+        return real(*a, **k)
+
+    monkeypatch.setattr(win, "load_items", wrapper)
+
+    with qtbot.waitSignal(win.signals.scan_finished, timeout=5000):
+        qtbot.keyClick(win, Qt.Key.Key_F5)
+
+    assert calls == []
+    assert "변경 없음" in win.statusBar().currentMessage()
+
+
+def test_folder_watcher_detects_new_file(win, folder, qtbot):
+    win.load_items(_items(folder), folder)
+    win._watch_timer.setInterval(100)
+    old_count = len(win.model.items())
+
+    make_jpeg(folder / "IMG_7.jpg", size=(80, 60))
+
+    qtbot.waitUntil(lambda: len(win.model.items()) == old_count + 1, timeout=5000)
+
+
+def test_own_metadata_write_does_not_trigger_a_reload(win, folder, qtbot, monkeypatch):
+    win.load_items(_items(folder), folder)
+    calls: list[int] = []
+    real = win.load_items
+
+    def wrapper(*a, **k):
+        calls.append(1)
+        return real(*a, **k)
+
+    monkeypatch.setattr(win, "load_items", wrapper)
+    win.next_item()
+
+    with qtbot.waitSignal(win.signals.write_finished, timeout=5000):
+        win.set_rating(3)
+
+    qtbot.wait(300)
+    assert calls == []
