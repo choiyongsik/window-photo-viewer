@@ -44,7 +44,7 @@ window-photo-viewer/
 │   └── filters.py        # 별점/라벨/reject 필터 → 인덱스 목록
 ├── ui/                   # PySide6
 │   ├── main_window.py    # 레이아웃, 단축키 바인딩, 모드 전이, 상태 헤더
-│   ├── loupe_view.py     # 단일 이미지 (QGraphicsView) — fit/100% 토글, 드래그 패닌
+│   ├── loupe_view.py     # 단일 이미지 (QGraphicsView) — fit/100% 토글, 드래그 패닝
 │   ├── filmstrip.py      # 하단 썸네일 스트립 + 별점/라벨/영상 아이콘 오버레이
 │   ├── grid_view.py      # 전체 썸네일 그리드 (개요 모드)
 │   ├── video_view.py     # QMediaPlayer + QVideoWidget
