@@ -1,7 +1,7 @@
 import pytest
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtGui import QImage
-from PySide6.QtWidgets import QGraphicsView
+from PySide6.QtWidgets import QGraphicsView, QSplitter, QWidget
 
 from ui.loupe_view import LoupeView
 
@@ -72,3 +72,24 @@ def test_new_image_resets_to_fit(view):
     view.toggle_zoom()
     view.set_image(_img(3000, 1500))
     assert view.is_fit
+
+
+def test_fit_with_zero_size_viewport_does_not_collapse_scale(qtbot):
+    v = LoupeView()
+    qtbot.addWidget(v)
+    splitter = QSplitter()
+    qtbot.addWidget(splitter)
+    splitter.addWidget(v)
+    splitter.addWidget(QWidget())
+    splitter.resize(500, 400)
+    splitter.setSizes([0, 500])
+    splitter.show()
+    qtbot.waitExposed(splitter)
+
+    v.set_image(_img(2000, 1000))
+    assert v.current_scale() > 0
+    assert v.is_fit
+
+    splitter.setSizes([400, 100])
+    qtbot.wait(20)
+    assert v.current_scale() == pytest.approx(400 / 2000, rel=0.05)

@@ -72,10 +72,16 @@ class LoupeView(QGraphicsView):
         self.setDragMode(QGraphicsView.DragMode.NoDrag)
         if not self._has_image:
             self.resetTransform()
+            self.centerOn(self._text_item)
             return
         br = self._pix_item.boundingRect()
         vp = self.viewport().rect()
         if br.width() <= 0 or br.height() <= 0:
+            return
+        if vp.width() <= 0 or vp.height() <= 0:
+            # Viewport is momentarily collapsed (e.g. a QSplitter pane at 0
+            # width). Leave the transform as-is; the pending resizeEvent
+            # will call fit() again once the viewport has a real size.
             return
         scale = min(vp.width() / br.width(), vp.height() / br.height(), 1.0)
         self.setTransform(QTransform.fromScale(scale, scale))
