@@ -475,3 +475,28 @@ def test_own_metadata_write_does_not_trigger_a_reload(win, folder, qtbot, monkey
 
     qtbot.wait(400)
     assert calls == []
+
+
+def test_filter_menu_group_reflects_current_filter(win, folder, qtbot):
+    from core.filters import NO_FILTER
+
+    win.load_items(_items(folder), folder)          # ratings: 0,3,5,-1,2
+    actions = win._filter_action_group.actions()
+    assert len(actions) == 12                        # 전체 + ★1~5 이상 + 정확히 ★1~5 + Reject
+    assert [a for a in actions if a.isChecked()] == [win._filter_actions[NO_FILTER]]
+
+    qtbot.keyClick(win, Qt.Key.Key_3, Qt.KeyboardModifier.AltModifier)
+    assert [a for a in actions if a.isChecked()] == [win._filter_actions[Filter(min_rating=3)]]
+
+    win._filter_actions[Filter(exact_rating=2)].trigger()
+    assert win.model.filter() == Filter(exact_rating=2)
+    assert win.model.visible_indices() == [4]
+    assert "filter: ★2" in win.header.text()
+
+    win._filter_actions[Filter(rejected_only=True)].trigger()
+    assert win.model.visible_indices() == [3]
+
+    win._filter_actions[NO_FILTER].trigger()
+    assert win.model.filter() == NO_FILTER
+    assert win.model.visible_indices() == [0, 1, 2, 3, 4]
+    assert [a for a in actions if a.isChecked()] == [win._filter_actions[NO_FILTER]]

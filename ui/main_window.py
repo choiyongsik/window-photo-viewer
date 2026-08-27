@@ -202,6 +202,34 @@ class MainWindow(QMainWindow):
         self.folder_panel_action.toggled.connect(lambda on: setattr(self, "folder_panel_visible", on))
         view_menu.addAction(self.folder_panel_action)
 
+        filter_menu = view_menu.addMenu("필터")
+        self._filter_action_group = QActionGroup(self)
+        self._filter_action_group.setExclusive(True)
+        self._filter_actions: dict[Filter, QAction] = {}
+
+        def add_filter_action(label: str, hint: str, f: Filter) -> None:
+            # Key hints are shown in the shortcut column but NOT registered as shortcuts:
+            # keyPressEvent already owns Alt+N / Alt+Shift+N / Alt+X / Alt+0, and a
+            # registered QKeySequence would race it (and break Alt+Shift+digit on real
+            # keyboards where Shift remaps the key).
+            action = QAction(f"{label}	{hint}", self)
+            action.setCheckable(True)
+            action.setChecked(f == self.model.filter())
+            action.triggered.connect(lambda checked=False, flt=f: self.set_filter(flt))
+            self._filter_action_group.addAction(action)
+            filter_menu.addAction(action)
+            self._filter_actions[f] = action
+
+        add_filter_action("전체", "Alt+0", NO_FILTER)
+        filter_menu.addSeparator()
+        for n in range(1, 6):
+            add_filter_action(f"★{n} 이상", f"Alt+{n}", Filter(min_rating=n))
+        filter_menu.addSeparator()
+        for n in range(1, 6):
+            add_filter_action(f"정확히 ★{n}", f"Alt+Shift+{n}", Filter(exact_rating=n))
+        filter_menu.addSeparator()
+        add_filter_action("Reject만", "Alt+X", Filter(rejected_only=True))
+
         sort_menu = view_menu.addMenu("정렬")
         self._sort_action_group = QActionGroup(self)
         self._sort_action_group.setExclusive(True)
@@ -442,7 +470,23 @@ class MainWindow(QMainWindow):
     # ---------------- filter ----------------
     def set_filter(self, f: Filter) -> None:
         self.model.set_filter(f)
+        self._sync_filter_actions(f)
         self._reconcile_current_after_filter()
+
+    def _sync_filter_actions(self, f: Filter) -> None:
+        actions = getattr(self, "_filter_actions", None)
+        if not actions:
+            return
+        action = actions.get(f)
+        if action is not None:
+            if not action.isChecked():
+                action.setChecked(True)
+        else:  # a filter with no menu entry: uncheck everything
+            checked = self._filter_action_group.checkedAction()
+            if checked is not None:
+                self._filter_action_group.setExclusive(False)
+                checked.setChecked(False)
+                self._filter_action_group.setExclusive(True)
 
     def clear_filter(self) -> None:
         self.set_filter(NO_FILTER)
