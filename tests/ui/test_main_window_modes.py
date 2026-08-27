@@ -413,6 +413,16 @@ def test_f5_picks_up_an_externally_edited_rating(win, folder, qtbot):
     item = win.model.items()[1]   # IMG_2.jpg, rating 3 per the `folder` fixture
     assert item.path.name == "IMG_2.jpg" and item.rating == 3
 
+    # Isolate from the folder watcher: the write below is a real tmp+rename that the
+    # OS-level watcher would also notice, and a watcher-triggered refresh racing the
+    # F5 one (both landing on the same waitSignal below) could -- if it arrives first
+    # -- take the "path set unchanged" skip branch and leave the F5 refresh's result
+    # unobserved by this test, even though F5 itself works correctly.
+    win._watch_timer.stop()
+    watched = win._watcher.directories()
+    if watched:
+        win._watcher.removePaths(watched)
+
     metadata.write_rating_label(item.path, item.kind, 5, metadata.Label.NONE)
 
     with qtbot.waitSignal(win.signals.scan_finished, timeout=5000):
