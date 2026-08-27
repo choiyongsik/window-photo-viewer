@@ -38,7 +38,11 @@ def make_image_thumbnail(src: Path, dst: Path, size: int = THUMB_SIZE) -> None:
 def make_video_thumbnail(src: Path, dst: Path, size: int = THUMB_SIZE) -> None:
     import imageio_ffmpeg
 
-    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    try:
+        ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception as exc:
+        raise ThumbnailError(f"{src.name}: ffmpeg unavailable: {exc}") from exc
+
     frame = dst.with_name(dst.stem + ".frame.jpg")
     try:
         for seek in ("1", "0"):  # 1s in; fall back to first frame for very short clips
@@ -68,9 +72,9 @@ class ThumbnailCache:
         dst = self.cache_path(item)
         if dst.exists():
             return dst
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
         part = dst.with_name(dst.stem + ".part.jpg")
         try:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
             if item.kind is MediaKind.VIDEO:
                 make_video_thumbnail(item.path, part)
             else:

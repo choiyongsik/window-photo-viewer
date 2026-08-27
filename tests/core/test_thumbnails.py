@@ -108,3 +108,23 @@ def test_cache_handles_video_and_corrupt_image(tmp_path: Path):
     with pytest.raises(ThumbnailError):
         cache.get_or_create(_item(bad))
     assert not any(tmp_path.joinpath("cache").glob("*.part.jpg"))
+
+
+def test_cache_dir_creation_failure_raises_thumbnail_error(tmp_path: Path):
+    blocked = tmp_path / "blocked"
+    blocked.write_bytes(b"not a directory")
+    cache = ThumbnailCache(blocked / "thumbs")
+    item = _item(make_jpeg(tmp_path / "a.jpg"))
+    with pytest.raises(ThumbnailError):
+        cache.get_or_create(item)
+
+
+def test_video_thumbnail_ffmpeg_unavailable_raises_thumbnail_error(tmp_path: Path, monkeypatch):
+    import imageio_ffmpeg
+
+    def _boom():
+        raise RuntimeError("no binary")
+
+    monkeypatch.setattr(imageio_ffmpeg, "get_ffmpeg_exe", _boom)
+    with pytest.raises(ThumbnailError):
+        make_video_thumbnail(tmp_path / "whatever.mp4", tmp_path / "t.jpg")
