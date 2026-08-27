@@ -10,6 +10,8 @@ from PIL import Image
 from PIL.TiffImagePlugin import IFDRational
 
 from core.metadata import (
+    XMP_LABEL,
+    XMP_RATING,
     MetadataError,
     populate,
     read_exif_summary,
@@ -71,6 +73,85 @@ def test_jpeg_zero_rating_removes_tags(tmp_path: Path):
         xmp = img.read_xmp()
     assert "Xmp.xmp.Rating" not in xmp
     assert "Xmp.xmp.Label" not in xmp
+
+
+_RICH_XMP = (
+    '<?xpacket begin="﻿" id="W5M0MpCehiHzreSzNTczkc9d"?>\n'
+    '<x:xmpmeta xmlns:x="adobe:ns:meta/">\n'
+    ' <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">\n'
+    '  <rdf:Description rdf:about=""\n'
+    '    xmlns:dc="http://purl.org/dc/elements/1.1/"\n'
+    '    xmlns:xmpMM="http://ns.adobe.com/xap/1.0/mm/"\n'
+    '    xmlns:stEvt="http://ns.adobe.com/xap/1.0/sType/ResourceEvent#"\n'
+    '    xmlns:custom="http://example.com/ns/custom/1.0/">\n'
+    "   <dc:subject>\n"
+    "    <rdf:Bag>\n"
+    "     <rdf:li>keyword1</rdf:li>\n"
+    "     <rdf:li>keyword2</rdf:li>\n"
+    "    </rdf:Bag>\n"
+    "   </dc:subject>\n"
+    "   <dc:title>\n"
+    "    <rdf:Alt>\n"
+    '     <rdf:li xml:lang="x-default">Test Title</rdf:li>\n'
+    '     <rdf:li xml:lang="ko-KR">테스트 제목</rdf:li>\n'
+    "    </rdf:Alt>\n"
+    "   </dc:title>\n"
+    "   <xmpMM:History>\n"
+    "    <rdf:Seq>\n"
+    '     <rdf:li rdf:parseType="Resource">\n'
+    "      <stEvt:action>saved</stEvt:action>\n"
+    "      <stEvt:instanceID>xmp.iid:1111</stEvt:instanceID>\n"
+    "      <stEvt:when>2026-08-27T10:00:00+09:00</stEvt:when>\n"
+    "     </rdf:li>\n"
+    "    </rdf:Seq>\n"
+    "   </xmpMM:History>\n"
+    "   <custom:myTag>custom-value</custom:myTag>\n"
+    "  </rdf:Description>\n"
+    " </rdf:RDF>\n"
+    "</x:xmpmeta>\n"
+    '<?xpacket end="w"?>\n'
+)
+
+
+def test_jpeg_write_preserves_foreign_xmp(tmp_path: Path):
+    """A JPEG carrying a real (Lightroom-shaped) XMP packet — a keyword bag,
+    a lang-alt title with a non-ASCII value, a nested xmpMM:History struct,
+    and an unregistered custom-namespace tag — must keep every key other
+    than Rating/Label byte-for-byte, whether or not the write actually
+    deletes a tag (i.e. through both the safe merge path and the
+    clear_xmp()-based rebuild path)."""
+    import pyexiv2
+
+    p = make_jpeg(tmp_path / "a.jpg")
+    with pyexiv2.ImageData(p.read_bytes()) as img:
+        img.modify_raw_xmp(_RICH_XMP)
+        seeded = img.get_bytes()
+    p.write_bytes(seeded)
+
+    with pyexiv2.ImageData(p.read_bytes()) as img:
+        before = img.read_xmp()
+    assert "Xmp.xmp.Rating" not in before
+    assert "Xmp.xmp.Label" not in before
+    assert "Xmp.dc.subject" in before  # sanity: seeding actually took
+
+    def foreign(xmp: dict) -> dict:
+        return {k: v for k, v in xmp.items() if k not in (XMP_RATING, XMP_LABEL)}
+
+    # No existing Rating/Label to delete -> safe modify_xmp() merge path.
+    write_rating_label(p, MediaKind.IMAGE, 3, Label.NONE)
+    with pyexiv2.ImageData(p.read_bytes()) as img:
+        after_rate = img.read_xmp()
+    assert foreign(after_rate) == before
+    assert after_rate[XMP_RATING] == "3"
+    assert XMP_LABEL not in after_rate
+
+    # Rating now exists and must be deleted -> clear_xmp() rebuild path.
+    write_rating_label(p, MediaKind.IMAGE, 0, Label.NONE)
+    with pyexiv2.ImageData(p.read_bytes()) as img:
+        after_clear = img.read_xmp()
+    assert foreign(after_clear) == before
+    assert XMP_RATING not in after_clear
+    assert XMP_LABEL not in after_clear
 
 
 def test_jpeg_write_failure_raises_and_leaves_no_tmp(tmp_path: Path, monkeypatch):

@@ -94,14 +94,23 @@ def _write_jpeg(path: Path, rating: int, label: Label) -> None:
         XMP_RATING: str(rating) if rating != 0 else "",   # "" means: delete the tag
         XMP_LABEL: label.value,                          # "" means: delete the tag
     }
-    to_delete = {k for k, v in updates.items() if v == ""}
-    to_set = {k: v for k, v in updates.items() if v != ""}
     with pyexiv2.ImageData(path.read_bytes()) as img:
+        current = img.read_xmp()
+        # Only a key that is both marked "" AND actually present needs deleting.
+        # ("rate 3, no label" on a photo with no existing color label is the
+        # overwhelmingly common case — there is nothing to delete there.)
+        to_delete = {k for k, v in updates.items() if v == "" and k in current}
+        to_set = {k: v for k, v in updates.items() if v != ""}
         if to_delete:
             # This pyexiv2 build does not treat modify_xmp({key: ""}) as a
             # delete (it just stores an empty string). Work around it by
-            # rebuilding the XMP packet without the deleted keys.
-            remaining = {k: v for k, v in img.read_xmp().items() if k not in to_delete}
+            # rebuilding the XMP packet without the deleted keys. This is
+            # destructive (clear_xmp() wipes every XMP key, not just ours)
+            # so it is only taken when a tag we own must actually be removed
+            # — the common no-op-delete write stays on the safe merge path
+            # below and never touches unrelated tags (keywords, develop
+            # history, custom namespaces, ...).
+            remaining = {k: v for k, v in current.items() if k not in to_delete}
             remaining.update(to_set)
             img.clear_xmp()
             if remaining:
