@@ -95,6 +95,34 @@ def test_video_item_shows_video_view_and_space_toggles_play(win, folder, qtbot, 
     assert win.content_stack.currentWidget() is win.loupe
 
 
+def test_navigating_to_video_autoplays(win, folder, qtbot, monkeypatch):
+    win.load_items(_items(folder), folder)
+    calls = []
+    monkeypatch.setattr(win.video, "play", lambda: calls.append(1))
+
+    win.next_item()
+    win.prev_item()
+
+    assert win.current == 0
+    assert win.current_item().kind is MediaKind.VIDEO
+    assert len(calls) >= 1
+
+
+def test_video_does_not_autoplay_in_grid_mode(win, folder, qtbot, monkeypatch):
+    win.load_items(_items(folder), folder)
+    win.show_grid()
+    calls = []
+    monkeypatch.setattr(win.video, "play", lambda: calls.append(1))
+
+    win.next_item()   # moves current, but grid mode does not display the video
+    win.prev_item()   # back onto clip.mp4 while still in grid mode
+    assert win.current == 0
+    assert calls == []
+
+    win.show_loupe()
+    assert calls == [1]
+
+
 def test_image_loads_into_loupe_and_neighbors_preload(win, folder, qtbot):
     win.load_items(_items(folder), folder)
     win.next_item()  # IMG_1

@@ -325,6 +325,8 @@ class MainWindow(QMainWindow):
         if item.kind is MediaKind.VIDEO:
             self.video.load(item.path)
             self.content_stack.setCurrentWidget(self.video)
+            if not self.is_grid:   # nothing visible in grid mode — don't start playback
+                self.video.play()
             return
         self.content_stack.setCurrentWidget(self.loupe)
         image = self.image_cache.get(self.current)
