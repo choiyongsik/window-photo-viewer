@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "window-photo-viewer"
+version = "0.1.0"
+description = "Keyboard-driven JPEG culling viewer that writes xmp:Rating for Lightroom Classic"
+requires-python = ">=3.12"
+dependencies = [
+    "PySide6>=6.7",
+    "pyexiv2>=2.12",
+    "Pillow>=10.0",
+    "imageio-ffmpeg>=0.5",
+    "defusedxml>=0.7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-qt>=4.4",
+    "pyinstaller>=6",
+]
+
+[tool.setuptools]
+packages = ["core", "ui"]
+py-modules = ["app"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+qt_api = "pyside6"
+addopts = "-q"
