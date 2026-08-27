@@ -20,6 +20,7 @@ from ui.workers import ImageLoadJob, MetadataWriteJob, ScanJob, ThumbnailJob, Wo
 
 PRELOAD_OFFSETS = (1, -1, 2, -2)
 EMPTY_TEXT = "폴더를 열어주세요 (Ctrl+O)"
+NO_MATCH_TEXT = "필터에 맞는 항목이 없습니다 (Alt+0: 필터 해제)"
 _RATING_KEYS = {Qt.Key.Key_1: 1, Qt.Key.Key_2: 2, Qt.Key.Key_3: 3, Qt.Key.Key_4: 4, Qt.Key.Key_5: 5}
 _LABEL_KEYS = {Qt.Key.Key_6: Label.RED, Qt.Key.Key_7: Label.YELLOW, Qt.Key.Key_8: Label.GREEN, Qt.Key.Key_9: Label.BLUE}
 
@@ -209,11 +210,14 @@ class MainWindow(QMainWindow):
         self._request_thumbnails(self._priority_order())
 
     def show_loupe(self) -> None:
+        was_grid = self.is_grid
         self.mode_stack.setCurrentWidget(self.loupe_page)
-        self._show_current()
+        if was_grid:
+            self._show_current()
 
     def _on_grid_double_clicked(self, row: int) -> None:
-        self._on_row_activated(row)
+        if 0 <= row < self.model.rowCount():
+            self._set_current(self.model.item_index_at_row(row), show=False)
         self.show_loupe()
 
     def toggle_fullscreen(self) -> None:
@@ -279,13 +283,14 @@ class MainWindow(QMainWindow):
             self.model.set_thumbnail_failed(idx)
 
     # ---------------- current item / display ----------------
-    def _set_current(self, idx: int) -> None:
+    def _set_current(self, idx: int, *, show: bool = True) -> None:
         self.current = idx
         row = self.model.row_for_item_index(idx) if idx >= 0 else -1
         if row >= 0:
             self.filmstrip.set_current_row(row)
             self.grid.set_current_row(row)
-        self._show_current()
+        if show:
+            self._show_current()
         self._preload_neighbors()
         self._update_header()
 
@@ -294,7 +299,8 @@ class MainWindow(QMainWindow):
         item = self.current_item()
         if item is None:
             self.content_stack.setCurrentWidget(self.loupe)
-            self.loupe.set_placeholder(EMPTY_TEXT)
+            no_match = bool(self.model.items()) and self.model.filter().is_active
+            self.loupe.set_placeholder(NO_MATCH_TEXT if no_match else EMPTY_TEXT)
             return
         if item.kind is MediaKind.VIDEO:
             self.video.load(item.path)
@@ -365,7 +371,12 @@ class MainWindow(QMainWindow):
         if not visible:
             self._set_current(-1)
         else:
-            candidates = [i for i in visible if i >= min(was_current, len(items) - 1)]
+            # The removal left-shifts every index after `idx`; compensate so we land
+            # on the item the user was actually looking at (or the one that slid into
+            # its slot), not the item one further along.
+            target = was_current - 1 if idx < was_current else was_current
+            target = max(0, min(target, len(items) - 1))
+            candidates = [i for i in visible if i >= target]
             self._set_current(candidates[0] if candidates else visible[-1])
         self._request_thumbnails(self._priority_order())
         self.statusBar().showMessage(f"파일이 사라져 목록에서 제외: {removed.path.name}", 8000)
@@ -373,7 +384,8 @@ class MainWindow(QMainWindow):
     def _update_header(self) -> None:
         item = self.current_item()
         if item is None:
-            self.header.setText(EMPTY_TEXT)
+            no_match = bool(self.model.items()) and self.model.filter().is_active
+            self.header.setText(NO_MATCH_TEXT if no_match else EMPTY_TEXT)
             return
         visible = self.model.visible_indices()
         pos = visible.index(self.current) + 1 if self.current in visible else 0

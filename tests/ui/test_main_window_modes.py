@@ -88,7 +88,7 @@ def test_filter_with_no_matches_shows_empty_state(win, folder, qtbot):
     win.set_rating(4)                                # only 5★ item drops out
     assert win.model.visible_indices() == []
     assert win.current == -1
-    assert "filter" in win.header.text() or "Ctrl+O" in win.header.text()
+    assert "Alt+0" in win.header.text()
     win.clear_filter()
     assert win.current == 0
 
@@ -138,6 +138,21 @@ def test_missing_file_is_removed_when_shown(win, folder, qtbot):
     assert [i.path.name for i in win.model.items()] == ["IMG_1.jpg", "IMG_3.jpg", "IMG_4.jpg", "IMG_5.jpg"]
     assert win.current_item().path.name == "IMG_3.jpg"
     assert "IMG_2.jpg" in win.statusBar().currentMessage()
+
+
+def test_missing_file_before_current_keeps_current_item(win, folder, qtbot):
+    win.load_items(_items(folder), folder)
+    qtbot.waitUntil(lambda: not win._pending_images, timeout=5000)  # initial preload settled
+    win.next_item()
+    win.next_item()
+    qtbot.waitUntil(lambda: not win._pending_images, timeout=5000)  # preload around IMG_3 settled
+    assert win.current == 2                          # IMG_3
+    (folder / "IMG_1.jpg").unlink()
+    win.image_cache.clear()                          # force a fresh decode attempt of the missing file
+    win._request_image(0)                             # mirrors what the preloader would do for a left neighbor
+    qtbot.waitUntil(lambda: len(win.model.items()) == 4, timeout=5000)
+    assert win.current_item().path.name == "IMG_3.jpg"
+    assert win.current == 1
 
 
 def test_thumbnail_priority_uses_active_view(win, folder):
