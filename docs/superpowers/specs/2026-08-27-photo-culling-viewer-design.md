@@ -228,3 +228,19 @@ XMP 스펙상 `Rating=-1`은 "rejected"이지만 **Lightroom Classic은 Pick/Rej
 **새로고침 (F5) 과 폴더 자동 감시** — `F5`(메뉴 파일 → "새로고침")는 `refresh_folder()`를 호출해 현재 선택 항목의 경로를 기억해 두고(`_restore_path`) 같은 폴더를 다시 스캔한다. 스캔 결과가 돌아왔을 때(`_on_scan_finished`) 그 폴더가 이미 열려 있던 폴더라면: 새 결과의 경로 집합이 현재 모델의 경로 집합과 완전히 같으면 — 화면 갱신 없이 상태 표시줄에 "변경 없음"(2초)만 띄운다. 이는 뷰어 자신이 별점/라벨을 기록할 때 만드는 tmp+rename이 폴더 변경 이벤트를 유발하는 것을 무해하게 흡수하기 위함이다. 경로 집합이 달라졌으면 목록을 갱신하고, `_restore_path`가 새 목록에 있으면 그 항목을 다시 선택한 뒤(없으면 첫 항목), 상태 표시줄에 `"{개수}개 항목 (새로고침)"`을 띄운다.
 
 폴더가 열릴 때마다(`load_items`) `QFileSystemWatcher`(`MainWindow._watcher`)가 감시 경로를 그 폴더 하나로 교체한다. `directoryChanged` 시그널이 오면 700ms 단발 타이머(`_watch_timer`)를 (재)시작하고, 만료되면(`_on_watch_timeout`) `refresh_folder()`를 호출한다 — 여러 변경이 짧은 시간에 몰려도 한 번만 새로고침하기 위한 디바운스. 뷰어 자신의 XMP 쓰기가 이 감시를 다시 촉발하는 것을 막기 위해, 별점/라벨 변경을 시작할 때(`_apply_change`)와 그 쓰기가 끝났을 때(`_on_write_finished`) 모두 `_suppress_watch_until = time.monotonic() + 2.0`을 설정하고, `_on_watch_timeout`은 그 시각 이전이면 새로고침을 건너뛴다 — 위에서 설명한 경로-집합 비교가 이를 보강하는 2차 방어선이다. 창을 닫을 때(`closeEvent`) 타이머를 멈추고 감시 경로를 비운다.
+
+### 10.5 폴더 트리 패널 (2026-08-27 변경)
+
+§10.2의 형제 목록을 대체한다: `FolderPanel`은 이제 QListWidget이 아니라 **루트 폴더 기준의 지연 로딩 QTreeWidget**이다 (단일 컬럼, 헤더 숨김, `NoFocus` — 방향키는 여전히 MainWindow가 처리하며 트리는 절대 키보드 포커스를 갖지 않는다).
+
+**트리 구조와 지연 로딩** — `set_root(root)`가 루트 노드를 만들어 펼친 상태로 보여준다. 펼쳐지지 않은 모든 디렉터리 노드는 자리표시자(placeholder) 자식 하나를 갖고 있다가, `itemExpanded`가 발생하면 그때 `list_child_folders(path)`(자연 정렬, `.`으로 시작하거나 Windows 숨김 속성인 항목 제외, `OSError` → 빈 목록)로 실제 자식을 채운다 — 한 번 로드된 노드는 다시 펼쳐도 재조회하지 않는다. 노드 텍스트는 처음엔 `folder.name`이고, `FolderCountJob`(`QRunnable`, 2-스레드 `QThreadPool`)이 그 노드가 로드될 때 새로 나타난 자식들의 이미지·영상 개수를 백그라운드에서 세어 `counts_ready` 시그널로 돌려주면 `name   (23장 · 1영상)` 형태로 갱신된다 (영상이 0이면 영상 부분 생략). 결과가 돌아왔을 때 그 경로가 더 이상 트리에 없으면(루트가 바뀌는 등) 조용히 무시한다. 루트 노드 자체는 개수를 세지 않고 이름만 보여주며, 전체 경로는 툴팁과 트리 위 헤더 레이블(elided)로 노출한다.
+
+**공개 인터페이스** — `set_root`/`root`/`set_folder`/`current_folder`/`visible_folders`/`next_folder`/`prev_folder`/`contains`/`folder_activated`. `set_folder(folder)`는 `folder`가 루트 밖이면 아무 것도 하지 않는다(루트를 바꿀지는 MainWindow가 결정한다) — 루트 안이면 조상 노드들을 필요한 만큼 펼치며(로드하며) 그 폴더를 굵게 표시하고 스크롤한다. `visible_folders()`는 현재 펼쳐진 노드들을 DFS 순서(루트 먼저)로 나열한 것이고, `next_folder`/`prev_folder`는 그 리스트에서 현재 위치의 앞뒤다. `contains(folder)`는 순수 경로 비교(`Path.relative_to`)로, 디스크 접근이 없다.
+
+**루트 규칙 (`MainWindow`)** — `QSettings`의 `root_folder` 키에 저장되는 `root_folder` 프로퍼티가 있다. `open_folder(folder)`는 `root_folder is None`이거나 `folder`가 현재 루트 밖(`not folder_panel.contains(folder)`)이면 `folder`를 새 루트로 삼은 뒤 스캔한다 — 그 외(루트 안)에는 루트를 바꾸지 않는다. 즉 `Ctrl+O`로 트리 안의 폴더를 열면 트리는 그대로이고, 트리 밖의 폴더를 열면 그 폴더가 새 루트가 된다. 시작 시 인자로 준 폴더나 `last_folder`도 동일한 규칙을 따른다(`MainWindow.__init__`이 저장된 `root_folder`가 아직 존재하면 `folder_panel.set_root()`로 복원하고, 사라졌으면 설정을 지운 뒤 이어서 `open_folder`가 규칙대로 루트를 정한다).
+
+**`Alt+↑` / "현재 폴더를 루트로"** — 메뉴 파일 → "루트 한 단계 위로"(`Alt+↑`, `MainWindow.go_to_parent_root`)는 루트가 최상위(`root.parent == root`)가 아니면 `root_folder`를 그 부모로 바꿔 트리를 위로 한 단계 확장한다 — 현재 열려 있는 폴더는 그대로이고 트리에서도 계속 강조 표시된다. 메뉴 파일 → "현재 폴더를 루트로"(`MainWindow.set_root_to_current_folder`)는 지금 열린 폴더를 새 루트로 지정한다. 두 동작 모두 루트를 바꾼 뒤 `folder_panel.set_folder(self.folder)`를 다시 호출해 현재 폴더의 강조 표시를 새 루트 기준으로 복원한다.
+
+**패널 폭 조절·저장** — `FolderPanel`은 더 이상 고정 폭이 아니라 `setMinimumWidth(180)`만 가지며, `QSplitter`의 경계를 드래그해 넓힐 수 있다. 창을 닫을 때(`closeEvent`) `self.splitter.saveState()`를 `QSettings`의 `splitter_state` 키에 저장하고, `_build_ui`에서 그 값이 `QByteArray`이면 `restoreState()`로 복원한다. `Ctrl+B`(폴더 패널 표시/숨김)와 그 영속 동작은 §10.2와 동일하다.
+
+`PgUp`/`PgDn`, 클릭으로 폴더 열기(`folder_activated` → `MainWindow.open_folder`) 동작은 §10.2와 동일한 원리이지만 이제 형제 목록이 아니라 트리의 현재 보이는 순서를 기준으로 한다.
