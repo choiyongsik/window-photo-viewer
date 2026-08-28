@@ -60,3 +60,51 @@ def test_scan_errors(tmp_path: Path):
     f = make_jpeg(tmp_path / "a.jpg")
     with pytest.raises(NotADirectoryError):
         scan(f)
+
+
+# ---------- is_hidden / iter_media_folders ----------
+
+def test_is_hidden_dot_prefix(tmp_path: Path):
+    from core.scanner import is_hidden
+
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "shown").mkdir()
+    assert is_hidden(tmp_path / ".git")
+    assert not is_hidden(tmp_path / "shown")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows-only hidden attribute")
+def test_is_hidden_windows_attribute(tmp_path: Path):
+    import ctypes
+
+    from core.scanner import is_hidden
+
+    d = tmp_path / "attr"
+    d.mkdir()
+    assert ctypes.windll.kernel32.SetFileAttributesW(str(d), 0x2)
+    assert is_hidden(d)
+
+
+def test_iter_media_folders_walks_root_first_in_natural_order(tmp_path: Path):
+    from core.scanner import iter_media_folders
+
+    for name in ("b10", "b2", "a"):
+        (tmp_path / name).mkdir()
+    (tmp_path / "a" / "deep").mkdir()
+    got = [p.relative_to(tmp_path).as_posix() for p in iter_media_folders(tmp_path)]
+    assert got == [".", "a", "a/deep", "b2", "b10"]
+
+
+def test_iter_media_folders_prunes_hidden_dirs(tmp_path: Path):
+    from core.scanner import iter_media_folders
+
+    (tmp_path / ".lrdata" / "inner").mkdir(parents=True)
+    (tmp_path / "ok").mkdir()
+    got = [p.relative_to(tmp_path).as_posix() for p in iter_media_folders(tmp_path)]
+    assert got == [".", "ok"]
+
+
+def test_iter_media_folders_missing_root_yields_nothing(tmp_path: Path):
+    from core.scanner import iter_media_folders
+
+    assert list(iter_media_folders(tmp_path / "nope")) == []

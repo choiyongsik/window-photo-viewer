@@ -12,20 +12,24 @@ from PySide6.QtWidgets import (
 
 from core.filters import NO_FILTER, Filter
 from core.models import Label, MediaItem, MediaKind
+from core.rating_cache import RatingCache
 from core.sorting import SortMode, sort_items
 from core.thumbnails import ThumbnailCache, default_cache_dir
-from ui.folder_panel import FolderPanel
+from ui.folder_panel import RATED_NODE_TEXT, FolderPanel
 from ui.image_cache import ImageCache
 from ui.loupe_view import LoupeView
 from ui.media_list_model import MediaListModel
 from ui.thumb_views import Filmstrip, GridView
 from ui.video_view import SEEK_STEP_MS, VideoView
-from ui.workers import ImageLoadJob, MetadataWriteJob, ScanJob, ThumbnailJob, WorkerSignals
+from ui.workers import ImageLoadJob, MetadataWriteJob, RatedCollectJob, ScanJob, ThumbnailJob, WorkerSignals
 
 PRELOAD_OFFSETS = (1, -1, 2, -2)
 EMPTY_TEXT = "폴더를 열어주세요 (Ctrl+O)"
 NO_ITEMS_TEXT = "이 폴더에 사진이 없습니다"
 NO_MATCH_TEXT = "필터에 맞는 항목이 없습니다 (Alt+0: 필터 해제)"
+NO_RATED_TEXT = "루트 아래에 별점 있는 사진이 없습니다"
+COLLECTING_TEXT = "별점 사진 수집 중…"
+NO_ROOT_TEXT = "루트 폴더가 없습니다 — 먼저 폴더를 열어주세요 (Ctrl+O)"
 _RATING_KEYS = {Qt.Key.Key_1: 1, Qt.Key.Key_2: 2, Qt.Key.Key_3: 3, Qt.Key.Key_4: 4, Qt.Key.Key_5: 5}
 _LABEL_KEYS = {Qt.Key.Key_6: Label.RED, Qt.Key.Key_7: Label.YELLOW, Qt.Key.Key_8: Label.GREEN, Qt.Key.Key_9: Label.BLUE}
 # VK_1..VK_5 (Windows virtual-key codes for the top-row digit keys).
@@ -55,7 +59,13 @@ def _digit_from_event(event: QKeyEvent) -> int | None:
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, thumb_cache: ThumbnailCache | None = None, settings: QSettings | None = None, parent=None):
+    def __init__(
+        self,
+        thumb_cache: ThumbnailCache | None = None,
+        settings: QSettings | None = None,
+        parent=None,
+        rating_cache: RatingCache | None = None,
+    ):
         super().__init__(parent)
         self.setWindowTitle("Photo Culling Viewer")
         self.resize(1280, 800)
@@ -64,10 +74,17 @@ class MainWindow(QMainWindow):
 
         self.settings = settings or QSettings("WindowPhotoViewer", "WindowPhotoViewer")
         self.thumb_cache = thumb_cache or ThumbnailCache(default_cache_dir())
+        # Ratings already read from files, keyed by (path, mtime, size) -- lives next
+        # to the thumbnail cache (%LOCALAPPDATA%\WindowPhotoViewer\ratings.json).
+        self.rating_cache = rating_cache or RatingCache(self.thumb_cache.cache_dir.parent / "ratings.json")
         self.image_cache = ImageCache(6)
         self.model = MediaListModel(self)
         self.folder: Path | None = None
         self._loading_folder: Path | None = None
+        # Root-wide "★ rated photos" collection: the root it was collected for while
+        # that view is showing (self.folder is None then), else None.
+        self._collection_root: Path | None = None
+        self._collect_job: RatedCollectJob | None = None
         self.current: int = -1
         # index -> the ImageLoadJob decoding it (jobs are kept so a cancelled queue
         # entry can be told apart from one already running; see _cancel_stale_images)
@@ -101,6 +118,8 @@ class MainWindow(QMainWindow):
         self.signals.image_ready.connect(self._on_image_ready)
         self.signals.image_failed.connect(self._on_image_failed)
         self.signals.write_finished.connect(self._on_write_finished)
+        self.signals.collect_progress.connect(self._on_collect_progress)
+        self.signals.collect_finished.connect(self._on_collect_finished)
 
         self.thumb_pool = QThreadPool(self)
         self.thumb_pool.setMaxThreadCount(4)
@@ -110,6 +129,11 @@ class MainWindow(QMainWindow):
         self.write_pool.setMaxThreadCount(1)   # serialize writes: never two jobs on one file
         self.scan_pool = QThreadPool(self)
         self.scan_pool.setMaxThreadCount(1)
+        # Its own pool, not scan_pool: a root-wide collection can run for a while,
+        # and scan_pool is a single FIFO thread -- queued there it would make the
+        # next plain folder open wait behind it.
+        self.collect_pool = QThreadPool(self)
+        self.collect_pool.setMaxThreadCount(1)
 
         self._build_ui()
         self._build_menu()
@@ -149,6 +173,7 @@ class MainWindow(QMainWindow):
 
         self.folder_panel = FolderPanel()
         self.folder_panel.folder_activated.connect(self.open_folder)
+        self.folder_panel.rated_collection_activated.connect(self.show_rated_collection)
         # Restore the last root if it still exists on disk; otherwise clear the
         # stale setting rather than pointing the tree at a folder that's gone.
         saved_root = self.root_folder
@@ -219,6 +244,11 @@ class MainWindow(QMainWindow):
         self.folder_panel_action.toggled.connect(lambda on: setattr(self, "folder_panel_visible", on))
         view_menu.addAction(self.folder_panel_action)
 
+        rated_action = QAction(f"{RATED_NODE_TEXT} 모아보기", self)
+        rated_action.setShortcut(QKeySequence("Ctrl+Shift+R"))
+        rated_action.triggered.connect(lambda checked=False: self.show_rated_collection())
+        view_menu.addAction(rated_action)
+
         filter_menu = view_menu.addMenu("필터")
         self._filter_action_group = QActionGroup(self)
         self._filter_action_group.setExclusive(True)
@@ -269,6 +299,11 @@ class MainWindow(QMainWindow):
         # discarded by _index_of, which no longer knows the old items.)
         self.thumb_pool.clear()
         self.image_pool.clear()
+        if folder is not None:
+            # A real folder replaces whatever collection was showing (or loading).
+            self._cancel_collect()
+            self._collection_root = None
+            self.folder_panel.set_collection_active(False)
         self.folder = folder
         self.folder_panel.set_folder(folder)
         self.video.stop()
@@ -288,7 +323,9 @@ class MainWindow(QMainWindow):
         self._request_thumbnails(self._priority_order())
         self.statusBar().showMessage(f"{len(items)}개 항목", 3000)
 
-    def open_folder(self, folder: Path) -> None:
+    def open_folder(self, folder: Path, *, refresh: bool = False) -> None:
+        """*refresh*: re-read every file's rating instead of trusting the rating
+        cache (an explicit F5 -- the way externally edited ratings get noticed)."""
         # Normalize away '..'/relative traversal before anything compares this path
         # against root_folder — otherwise e.g. "root/../other" could be judged
         # "inside root" by a naive comparison despite actually being outside it.
@@ -301,11 +338,17 @@ class MainWindow(QMainWindow):
         # Root rule: opening a folder inside the current root just moves within the
         # tree; opening one outside it re-roots the tree at that folder. Ctrl+O
         # inside the tree therefore never disturbs the root, but any other jump does.
+        # Opening a folder abandons any collection still being gathered (its result
+        # would be stale on arrival anyway -- see _on_collect_finished). Done before
+        # the root rule below: re-rooting while a collection is active would
+        # otherwise kick off a collection for the new root just to cancel it.
+        self._cancel_collect()
+        self._collection_root = None
         if self.root_folder is None or not self.folder_panel.contains(folder):
             self.root_folder = folder
         self._loading_folder = folder
         self.statusBar().showMessage(f"불러오는 중: {folder}")
-        self.scan_pool.start(ScanJob(folder, self.signals))
+        self.scan_pool.start(ScanJob(folder, self.signals, self.rating_cache, refresh=refresh))
 
     def _on_scan_finished(self, items: list[MediaItem], folder: Path) -> None:
         # scan_pool is a single FIFO thread: opening B while A is still scanning means
@@ -349,11 +392,81 @@ class MainWindow(QMainWindow):
         self.settings.setValue("last_folder", str(folder))
 
     def refresh_folder(self) -> None:
+        # An explicit F5 bypasses the rating cache (ratings edited by another tool
+        # that kept the file's mtime would otherwise never show up). A refresh the
+        # folder watcher triggered keeps trusting it: whatever changed on disk has a
+        # new mtime/size and misses the cache on its own.
+        refresh = not self._refresh_from_watcher
+        if self._collection_root is not None:
+            current = self.current_item()
+            self._restore_path = current.path if current is not None else None
+            self.show_rated_collection(refresh=refresh)
+            return
         if self.folder is None:
             return
         current = self.current_item()
         self._restore_path = current.path if current is not None else None
-        self.open_folder(self.folder)
+        self.open_folder(self.folder, refresh=refresh)
+
+    # ---------------- rated collection ----------------
+    @property
+    def collection_active(self) -> bool:
+        """True while the main view shows the root-wide rated collection."""
+        return self._collection_root is not None and self._collect_job is None
+
+    def show_rated_collection(self, *, refresh: bool = False) -> None:
+        """Gather every rated (★1..5) item under the current root into one list.
+        Runs in the background; the view switches when the result arrives.
+        *refresh*: re-read every file instead of trusting the rating cache."""
+        root = self.root_folder
+        if root is None:
+            self.statusBar().showMessage(NO_ROOT_TEXT, 5000)
+            return
+        self._cancel_collect()
+        self._loading_folder = None   # a folder scan still in flight is now stale
+        self._collection_root = root
+        self.statusBar().showMessage(f"별점 사진 수집 중… ({root})")
+        job = RatedCollectJob(root, self.signals, self.rating_cache, refresh=refresh)
+        self._collect_job = job
+        self.collect_pool.start(job)
+
+    def _cancel_collect(self) -> None:
+        job = self._collect_job
+        if job is None:
+            return
+        job.cancel()
+        self.collect_pool.clear()
+        self._collect_job = None
+
+    def _on_collect_progress(self, job: RatedCollectJob, progress) -> None:
+        if self._closing or job is not self._collect_job:
+            return
+        self.statusBar().showMessage(
+            f"별점 사진 수집 중… {progress.folders}폴더 · {progress.files}장 확인 · ★{progress.rated}"
+        )
+
+    def _on_collect_finished(self, job: RatedCollectJob, items: list[MediaItem] | None) -> None:
+        # Identity, not root, decides staleness: a cancelled job's None must never be
+        # mistaken for the failure of the job that replaced it for the same root.
+        if self._closing or job is not self._collect_job:
+            self._restore_path = None
+            return
+        self._collect_job = None
+        root = job.root
+        if items is None:   # not a cancellation (that clears _collect_job first): a failure
+            self._restore_path = None
+            self.statusBar().showMessage("별점 사진을 수집할 수 없습니다", 8000)
+            return
+        self.load_items(items, None)
+        self.folder_panel.set_collection_active(True)
+        self.folder_panel.set_rated_count(len(items))
+        if self._restore_path is not None:
+            for i, item in enumerate(self.model.items()):
+                if item.path == self._restore_path:
+                    self._set_current(i)
+                    break
+        self._restore_path = None
+        self.statusBar().showMessage(f"★ {len(items)}장 (루트: {root})", 5000)
 
     def _on_scan_failed(self, message: str, folder: Path) -> None:
         self._refresh_from_watcher = False
@@ -415,6 +528,11 @@ class MainWindow(QMainWindow):
     def root_folder(self, folder: Path | None) -> None:
         self.settings.setValue("root_folder", str(folder) if folder is not None else "")
         self.folder_panel.set_root(folder)
+        if self._collection_root is not None and folder is not None and folder != self._collection_root:
+            # The collection is "everything rated under the root": a new root means
+            # a new collection (e.g. Alt+Up widens it). set_root() rebuilt the tree,
+            # so the node highlight/count are re-applied when the result lands.
+            self.show_rated_collection()
 
     @property
     def sort_mode(self) -> SortMode:
@@ -597,6 +715,8 @@ class MainWindow(QMainWindow):
         """What to show when there is no current item: no folder, an empty folder, or a filter that matches nothing."""
         if self.model.items():
             return NO_MATCH_TEXT if self.model.filter().is_active else EMPTY_TEXT
+        if self._collection_root is not None:
+            return COLLECTING_TEXT if self._collect_job is not None else NO_RATED_TEXT
         return NO_ITEMS_TEXT if self.folder is not None else EMPTY_TEXT
 
     def _show_current(self) -> None:
@@ -713,11 +833,15 @@ class MainWindow(QMainWindow):
             return
         visible = self.model.visible_indices()
         pos = visible.index(self.current) + 1 if self.current in visible else 0
+        # Only once the collection is what's on screen: while it is still being
+        # gathered from a folder view, the header keeps describing that folder.
+        in_collection = self._collection_root is not None and self.folder is None
         parts = [
-            str(self.folder) if self.folder else "",
+            f"{RATED_NODE_TEXT} ({self._collection_root})" if in_collection else (str(self.folder) if self.folder else ""),
             item.stars(),
             f"[{item.label.value}]" if item.label is not Label.NONE else "",
-            item.path.name,
+            # Items from many folders share names in a collection: show the parent too.
+            f"{item.path.parent.name}/{item.path.name}" if in_collection else item.path.name,
             f"{pos}/{len(visible)}",
             item.exif.format() if item.exif else "",
             f"sort: {self.sort_mode.describe()}" if self.sort_mode is not SortMode.NAME_ASC else "",
@@ -832,7 +956,7 @@ class MainWindow(QMainWindow):
         item.write_error = None
         self.model.item_changed(idx)
         self._suppress_watch_until = time.monotonic() + 2.0
-        self.write_pool.start(MetadataWriteJob(item, self.signals))
+        self.write_pool.start(MetadataWriteJob(item, self.signals, self.rating_cache))
 
         if self.model.filter().is_active and not self.model.filter().matches(item):
             self.model.refresh_filter()
@@ -951,6 +1075,7 @@ class MainWindow(QMainWindow):
         # close for as long as whatever count batch is still running (unbounded on a
         # slow or network drive) instead of the bounded waits below.
         self.folder_panel.shutdown()
+        self._cancel_collect()
         self._watch_timer.stop()
         watched = self._watcher.directories()
         if watched:
@@ -960,10 +1085,12 @@ class MainWindow(QMainWindow):
         # what keeps us safe on timeout — self.signals is unparented (see __init__)
         # specifically so a job that outlives this wait can still emit safely; Qt
         # drops the emit once this window's slots are gone instead of crashing.
-        for pool in (self.scan_pool, self.thumb_pool, self.image_pool):
+        for pool in (self.scan_pool, self.collect_pool, self.thumb_pool, self.image_pool):
             pool.clear()
             pool.waitForDone(2000)
         # write_pool: never clear() — a queued rating write must not be silently
         # dropped on close. Just give it a couple seconds to finish.
         self.write_pool.waitForDone(2000)
+        # After the pools: a write that just finished has stored its new entry.
+        self.rating_cache.save()
         super().closeEvent(event)

@@ -1,40 +1,29 @@
 from __future__ import annotations
 
 import os
-import stat
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, Signal
 from PySide6.QtWidgets import QLabel, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget
 
 from core.models import IMAGE_EXTENSIONS, VIDEO_EXTENSIONS
-from core.scanner import natural_key
+from core.scanner import is_hidden, natural_key
 
 PANEL_MIN_WIDTH = 180
 PLACEHOLDER_TEXT = "폴더 없음"
-# Windows marks files/dirs hidden with an attribute rather than a leading dot; 0
-# elsewhere, which makes the mask test below a no-op on other platforms (mirrors
-# core/scanner.py's own check).
-_HIDDEN_MASK = getattr(stat, "FILE_ATTRIBUTE_HIDDEN", 0)
+RATED_NODE_TEXT = "★ 별점 있는 사진"
+RATED_NODE_TOOLTIP = "루트 아래 모든 폴더에서 별점 1 이상인 사진·영상 (Reject 제외)"
 
 # Item data roles on column 0. _ROLE_PATH holds the Path for a real folder node, or
-# None for the lazy-load placeholder child every unexpanded directory node carries.
-# _ROLE_LOADED marks whether a directory node's real children have been fetched yet
-# (guards against re-listing the folder every time it is re-expanded).
+# None for the lazy-load placeholder child every unexpanded directory node carries
+# and for the virtual "rated photos" node. _ROLE_LOADED marks whether a directory
+# node's real children have been fetched yet (guards against re-listing the folder
+# every time it is re-expanded). _ROLE_VIRTUAL tags the one node that is not a
+# folder at all (the root-wide rated collection).
 _ROLE_PATH = Qt.ItemDataRole.UserRole
 _ROLE_LOADED = Qt.ItemDataRole.UserRole + 1
-
-
-def _is_hidden(entry: Path) -> bool:
-    if entry.name.startswith("."):
-        return True
-    if not _HIDDEN_MASK:
-        return False
-    try:
-        st = entry.stat()
-    except OSError:
-        return False
-    return bool(getattr(st, "st_file_attributes", 0) & _HIDDEN_MASK)
+_ROLE_VIRTUAL = Qt.ItemDataRole.UserRole + 2
+_VIRTUAL_RATED = "rated"
 
 
 def _counts(folder: Path) -> tuple[int, int]:
@@ -85,7 +74,7 @@ def list_child_folders(folder: Path, keep: frozenset[Path] = frozenset()) -> lis
                 continue
         except OSError:
             continue
-        if _is_hidden(entry) and entry not in keep:
+        if is_hidden(entry) and entry not in keep:
             continue
         dirs.append(entry)
     dirs.sort(key=lambda p: natural_key(p.name))
@@ -143,12 +132,16 @@ class FolderPanel(QWidget):
     """
 
     folder_activated = Signal(object)   # Path — ignored when it is the current folder
+    # The virtual "★ rated photos" node was clicked. Emitted even while the
+    # collection is already showing: re-clicking is how the user re-collects.
+    rated_collection_activated = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMinimumWidth(PANEL_MIN_WIDTH)
         self._root: Path | None = None
         self._root_item: QTreeWidgetItem | None = None
+        self._rated_item: QTreeWidgetItem | None = None
         self._current: Path | None = None
         self._highlighted_item: QTreeWidgetItem | None = None
         self._path_to_item: dict[Path, QTreeWidgetItem] = {}
@@ -211,6 +204,7 @@ class FolderPanel(QWidget):
         self._path_to_item.clear()
         self._root = root
         self._root_item = None
+        self._rated_item = None
         self._current = None
         self._highlighted_item = None
 
@@ -221,6 +215,14 @@ class FolderPanel(QWidget):
 
         self._header.setText(self._elided(str(root)))
         self._header.setToolTip(str(root))
+        # The virtual collection node sits above the tree proper so it is always in
+        # view, however deep the folder tree below it gets.
+        rated_item = QTreeWidgetItem([RATED_NODE_TEXT])
+        rated_item.setData(0, _ROLE_PATH, None)
+        rated_item.setData(0, _ROLE_VIRTUAL, _VIRTUAL_RATED)
+        rated_item.setToolTip(0, RATED_NODE_TOOLTIP)
+        self._tree.addTopLevelItem(rated_item)
+        self._rated_item = rated_item
         root_item = self._make_node(root)
         self._tree.addTopLevelItem(root_item)
         self._root_item = root_item
@@ -327,6 +329,23 @@ class FolderPanel(QWidget):
 
     def current_folder(self) -> Path | None:
         return self._current
+
+    # ---------------- virtual "rated" node ----------------
+    def set_collection_active(self, on: bool) -> None:
+        """Highlight the virtual node (and forget the current folder) while the
+        root-wide rated collection is what the main view shows."""
+        self._clear_highlight()
+        if not on:
+            return
+        self._current = None
+        if self._rated_item is not None:
+            self._highlight(self._rated_item)
+
+    def set_rated_count(self, count: int | None) -> None:
+        if self._rated_item is None:
+            return
+        text = RATED_NODE_TEXT if count is None else f"{RATED_NODE_TEXT}   ({count}장)"
+        self._rated_item.setText(0, text)
 
     def _ensure_item(self, folder: Path) -> QTreeWidgetItem | None:
         """The tree item for *folder*, expanding (and lazily loading) every ancestor
@@ -443,6 +462,9 @@ class FolderPanel(QWidget):
 
     # ---------------- clicking ----------------
     def _on_item_clicked(self, item: QTreeWidgetItem, _column: int) -> None:
+        if item.data(0, _ROLE_VIRTUAL) == _VIRTUAL_RATED:
+            self.rated_collection_activated.emit()
+            return
         path = item.data(0, _ROLE_PATH)
         if path is None or path == self._current:
             return

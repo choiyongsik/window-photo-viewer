@@ -1,6 +1,9 @@
 """Rating/label persistence.
 
-JPEG  → embedded XMP packet (Xmp.xmp.Rating / Xmp.xmp.Label) via pyexiv2. Lightroom Classic reads this.
+JPEG  → embedded XMP packet (Xmp.xmp.Rating / Xmp.xmp.Label). Lightroom Classic reads this.
+        Written via pyexiv2; READ by parsing the APP1 segment straight out of the file
+        header (tens of KB, never the whole file) so root-wide collections stay cheap.
+PNG   → XMP in an iTXt chunk, read and written via pyexiv2 (whole file).
 Video → sidecar `<stem>.xmp` written by us (exiv2 cannot write MP4/MOV). Viewer-internal.
 """
 from __future__ import annotations
@@ -13,6 +16,7 @@ from defusedxml import ElementTree as ET  # stdlib ET is vulnerable to XXE / ent
 from PIL import Image
 
 from core.models import ExifSummary, Label, MediaItem, MediaKind
+from core.rating_cache import RatingCache
 
 XMP_RATING = "Xmp.xmp.Rating"
 XMP_LABEL = "Xmp.xmp.Label"
@@ -49,7 +53,61 @@ def _parse_rating(value: str | None) -> int:
     return max(-1, min(5, r))
 
 
+_JPEG_EXTENSIONS = frozenset({".jpg", ".jpeg"})
+_XMP_APP1_SIGNATURE = b"http://ns.adobe.com/xap/1.0/\x00"
+_SOI, _APP1, _SOS = 0xD8, 0xE1, 0xDA
+
+
 def _read_jpeg(path: Path) -> tuple[int, Label]:
+    """JPEG: parse the XMP packet straight out of the file header (reads only the
+    metadata segments before the pixel data — tens of KB, not the whole file). A
+    JPEG with no XMP packet is simply unrated; that verdict is final and never
+    re-checked with pyexiv2, because the whole-file read that would take is exactly
+    what this path exists to avoid. Anything that isn't a JPEG (PNG), or a header
+    that can't be parsed, falls back to pyexiv2 over the whole file."""
+    if path.suffix.lower() in _JPEG_EXTENSIONS:
+        try:
+            packet = _read_jpeg_xmp_packet(path)
+            if packet is None:
+                return 0, Label.NONE
+            return _parse_xmp_packet(packet)
+        except Exception:
+            pass   # odd header or XML: let pyexiv2 have a go at the whole file
+    return _read_with_pyexiv2(path)
+
+
+def _read_jpeg_xmp_packet(path: Path) -> bytes | None:
+    """The raw XMP packet from the JPEG's APP1 segment, or None if there is none
+    before the image data starts. Raises on a malformed header."""
+    with open(path, "rb") as f:
+        if f.read(2) != bytes([0xFF, _SOI]):
+            raise ValueError("not a JPEG")
+        while True:
+            marker = f.read(2)
+            if len(marker) < 2 or marker[0] != 0xFF:
+                raise ValueError("bad JPEG marker")
+            kind = marker[1]
+            if kind == _SOS:
+                return None   # pixel data from here on; XMP would have come first
+            if kind == 0xFF or 0xD0 <= kind <= 0xD9:
+                continue      # fill byte / standalone marker: no length field
+            length_bytes = f.read(2)
+            if len(length_bytes) < 2:
+                raise ValueError("truncated segment length")
+            length = int.from_bytes(length_bytes, "big") - 2
+            if length < 0:
+                raise ValueError("bad segment length")
+            if kind == _APP1:
+                payload = f.read(length)
+                if len(payload) < length:
+                    raise ValueError("truncated APP1 segment")
+                if payload.startswith(_XMP_APP1_SIGNATURE):
+                    return payload[len(_XMP_APP1_SIGNATURE):]
+            else:
+                f.seek(length, os.SEEK_CUR)
+
+
+def _read_with_pyexiv2(path: Path) -> tuple[int, Label]:
     with pyexiv2.ImageData(path.read_bytes()) as img:
         xmp = img.read_xmp()
     return _parse_rating(xmp.get(XMP_RATING)), Label.from_xmp(xmp.get(XMP_LABEL))
@@ -58,7 +116,13 @@ def _read_jpeg(path: Path) -> tuple[int, Label]:
 def _read_sidecar(sc: Path) -> tuple[int, Label]:
     if not sc.exists():
         return 0, Label.NONE
-    root = ET.parse(sc).getroot()
+    return _parse_xmp_packet(sc.read_bytes())
+
+
+def _parse_xmp_packet(data: bytes) -> tuple[int, Label]:
+    """Rating/label out of an XMP packet (embedded or sidecar). Both the attribute
+    form Lightroom writes (xmp:Rating="3") and the element form are accepted."""
+    root = ET.fromstring(data)
     rating: str | None = None
     label: str | None = None
     for desc in root.iter(f"{{{_RDF_NS}}}Description"):
@@ -200,6 +264,22 @@ def read_exif_summary(path: Path) -> ExifSummary | None:
         return None
 
 
-def populate(item: MediaItem) -> None:
-    item.rating, item.label = read_rating_label(item.path, item.kind)
+def read_rating_label_cached(
+    path: Path, kind: MediaKind, mtime: float, size: int, cache: RatingCache | None, *, refresh: bool = False
+) -> tuple[int, Label]:
+    """read_rating_label through *cache*: a hit for this (path, mtime, size) is
+    trusted without opening the file unless *refresh*; a miss (or a refresh) reads
+    the file and records the answer -- unrated files included."""
+    if cache is not None and not refresh:
+        hit = cache.lookup(path, mtime, size)
+        if hit is not None:
+            return hit
+    rating, label = read_rating_label(path, kind)
+    if cache is not None:
+        cache.store(path, mtime, size, rating, label)
+    return rating, label
+
+
+def populate(item: MediaItem, cache: RatingCache | None = None, *, refresh: bool = False) -> None:
+    item.rating, item.label = read_rating_label_cached(item.path, item.kind, item.mtime, item.size, cache, refresh=refresh)
     item.exif = read_exif_summary(item.path) if item.kind is MediaKind.IMAGE else None

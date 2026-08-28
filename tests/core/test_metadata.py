@@ -269,3 +269,146 @@ def test_png_roundtrip_keeps_pixel_data(tmp_path: Path):
     write_rating_label(p, MediaKind.IMAGE, 0, Label.NONE)
     assert read_rating_label(p, MediaKind.IMAGE) == (0, Label.NONE)
     assert idat_bytes(before) == idat_bytes(p.read_bytes())
+
+
+# ---------- header-only JPEG XMP read ----------
+
+def _disable_pyexiv2(monkeypatch):
+    """Make any pyexiv2 use blow up so a test can prove the header path was used."""
+    import pyexiv2
+
+    def _boom(*_a, **_k):
+        raise AssertionError("pyexiv2 must not be used for JPEG rating reads")
+
+    monkeypatch.setattr(pyexiv2, "ImageData", _boom)
+
+
+def test_jpeg_rating_is_read_from_header_without_pyexiv2(tmp_path: Path, monkeypatch):
+    p = make_jpeg(tmp_path / "a.jpg")
+    write_rating_label(p, MediaKind.IMAGE, 3, Label.RED)
+    _disable_pyexiv2(monkeypatch)
+    assert read_rating_label(p, MediaKind.IMAGE) == (3, Label.RED)
+
+
+def test_jpeg_reject_is_read_from_header(tmp_path: Path, monkeypatch):
+    p = make_jpeg(tmp_path / "a.jpg")
+    write_rating_label(p, MediaKind.IMAGE, -1, Label.NONE)
+    _disable_pyexiv2(monkeypatch)
+    assert read_rating_label(p, MediaKind.IMAGE) == (-1, Label.NONE)
+
+
+def test_jpeg_without_xmp_does_not_fall_back_to_pyexiv2(tmp_path: Path, monkeypatch):
+    p = make_jpeg(tmp_path / "a.jpg")
+    _disable_pyexiv2(monkeypatch)
+    assert read_rating_label(p, MediaKind.IMAGE) == (0, Label.NONE)
+
+
+def _jpeg_with_raw_xmp(path: Path, packet: str) -> Path:
+    """A valid JPEG whose APP1/XMP segment is *packet* verbatim (bypasses pyexiv2)."""
+    make_jpeg(path)
+    data = path.read_bytes()
+    assert data[:2] == b"\xff\xd8"
+    payload = b"http://ns.adobe.com/xap/1.0/\x00" + packet.encode("utf-8")
+    seg = b"\xff\xe1" + (len(payload) + 2).to_bytes(2, "big") + payload
+    path.write_bytes(data[:2] + seg + data[2:])
+    return path
+
+
+def test_jpeg_header_read_accepts_element_form(tmp_path: Path, monkeypatch):
+    packet = (
+        '<?xpacket begin="\ufeff" id="W5M0MpCehiHzreSzNTczkc9d"?>'
+        '<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">'
+        '<rdf:Description rdf:about="" xmlns:xmp="http://ns.adobe.com/xap/1.0/">'
+        "<xmp:Rating>4</xmp:Rating><xmp:Label>Blue</xmp:Label>"
+        "</rdf:Description></rdf:RDF></x:xmpmeta><?xpacket end=\"w\"?>"
+    )
+    p = _jpeg_with_raw_xmp(tmp_path / "a.jpg", packet)
+    _disable_pyexiv2(monkeypatch)
+    assert read_rating_label(p, MediaKind.IMAGE) == (4, Label.BLUE)
+
+
+def test_jpeg_header_read_only_touches_the_header(tmp_path: Path, monkeypatch):
+    """The whole point: a rating read must not read the image data."""
+    import builtins
+    import io
+
+    p = make_jpeg(tmp_path / "a.jpg")
+    write_rating_label(p, MediaKind.IMAGE, 2, Label.NONE)
+    header_len = len(p.read_bytes()) - len(scan_segment(p.read_bytes()))
+    # Pad the file with lots of trailing bytes after the pixel data; a header-only
+    # reader never gets there, a whole-file reader has to swallow all of it.
+    with open(p, "ab") as f:
+        f.write(b"\x00" * (4 * 1024 * 1024))
+
+    read_total = 0
+    real_open = io.open
+
+    def counting_open(file, mode="r", *a, **k):
+        fh = real_open(file, mode, *a, **k)
+        if "b" in mode and "r" in mode:
+            orig = fh.read
+
+            def read(n=-1):
+                nonlocal read_total
+                chunk = orig(n)
+                read_total += len(chunk)
+                return chunk
+
+            fh.read = read
+        return fh
+
+    # pathlib.Path.read_bytes goes through io.open, plain open() through builtins.
+    monkeypatch.setattr(io, "open", counting_open)
+    monkeypatch.setattr(builtins, "open", counting_open)
+    assert read_rating_label(p, MediaKind.IMAGE) == (2, Label.NONE)
+    assert read_total <= header_len + 4096
+
+
+def test_truncated_jpeg_segment_reads_as_default(tmp_path: Path):
+    p = tmp_path / "trunc.jpg"
+    p.write_bytes(b"\xff\xd8\xff\xe1\xff\xff" + b"http://ns.adobe.com/xap/1.0/\x00<x")
+    assert read_rating_label(p, MediaKind.IMAGE) == (0, Label.NONE)
+
+
+def test_png_rating_still_read_via_pyexiv2(tmp_path: Path):
+    p = make_png(tmp_path / "a.png")
+    write_rating_label(p, MediaKind.IMAGE, 5, Label.YELLOW)
+    assert read_rating_label(p, MediaKind.IMAGE) == (5, Label.YELLOW)
+
+
+# ---------- populate + rating cache ----------
+
+def test_populate_uses_cache_and_fills_it(tmp_path: Path, monkeypatch):
+    import core.metadata as md
+    from core.rating_cache import RatingCache
+    from core.scanner import scan
+
+    p = make_jpeg(tmp_path / "a.jpg")
+    write_rating_label(p, MediaKind.IMAGE, 2, Label.NONE)
+    cache = RatingCache(tmp_path / "c.json")
+    item = scan(tmp_path)[0]
+
+    populate(item, cache=cache)
+    assert item.rating == 2
+    assert cache.lookup(p, item.mtime, item.size) == (2, Label.NONE)
+
+    monkeypatch.setattr(md, "read_rating_label", lambda *_a: (_ for _ in ()).throw(AssertionError("must hit cache")))
+    fresh = scan(tmp_path)[0]
+    populate(fresh, cache=cache)
+    assert fresh.rating == 2
+
+
+def test_populate_refresh_bypasses_cache(tmp_path: Path):
+    from core.rating_cache import RatingCache
+    from core.scanner import scan
+
+    p = make_jpeg(tmp_path / "a.jpg")
+    cache = RatingCache(tmp_path / "c.json")
+    item = scan(tmp_path)[0]
+    cache.store(p, item.mtime, item.size, 5, Label.NONE)   # a lie the file does not back
+
+    populate(item, cache=cache)
+    assert item.rating == 5                                  # trusted without refresh
+    populate(item, cache=cache, refresh=True)
+    assert item.rating == 0                                  # re-read from the file, cache corrected
+    assert cache.lookup(p, item.mtime, item.size) == (0, Label.NONE)

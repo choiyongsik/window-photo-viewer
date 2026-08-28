@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "window-photo-viewer"
-version = "0.1.1"
+version = "0.1.2"
 description = "Keyboard-driven JPEG culling viewer that writes xmp:Rating for Lightroom Classic"
 requires-python = ">=3.12"
 dependencies = [

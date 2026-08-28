@@ -7,7 +7,7 @@ from PySide6.QtCore import Qt
 
 import ui.folder_panel as folder_panel_module
 from tests.helpers import make_jpeg
-from ui.folder_panel import PLACEHOLDER_TEXT, FolderPanel, list_child_folders
+from ui.folder_panel import PLACEHOLDER_TEXT, RATED_NODE_TEXT, FolderPanel, list_child_folders
 
 
 def _make_folder(base: Path, name: str, n_images: int = 1, n_videos: int = 0) -> Path:
@@ -64,8 +64,9 @@ def test_set_root_shows_root_expanded(qtbot, tmp_path):
     panel.set_root(root)
 
     assert panel.root() == root
-    assert panel._tree.topLevelItemCount() == 1
-    root_item = panel._tree.topLevelItem(0)
+    # top-level 0 is the virtual "rated photos" node, the real root sits below it
+    assert panel._tree.topLevelItemCount() == 2
+    root_item = panel._tree.topLevelItem(1)
     assert root_item.isExpanded() is True
     assert root_item.text(0) == "root"
     assert root_item.toolTip(0) == str(root)
@@ -104,7 +105,7 @@ def test_hidden_dirs_excluded_from_tree(qtbot, tmp_path):
     qtbot.addWidget(panel)
     panel.set_root(root)
 
-    root_item = panel._tree.topLevelItem(0)
+    root_item = panel._tree.topLevelItem(1)
     names = [root_item.child(i).text(0) for i in range(root_item.childCount())]
     assert names == ["A"]
 
@@ -472,3 +473,95 @@ def test_header_reelides_on_resize(qtbot, tmp_path):
 
     panel.resize(200, 300)
     qtbot.waitUntil(lambda: panel._header.text() != wide_text, timeout=2000)
+
+
+# ---------------- FolderPanel: virtual "rated" node ----------------
+
+def test_rated_node_is_first_top_level_item_when_root_set(qtbot, tmp_path):
+    root = tmp_path / "root"
+    _make_folder(root, "A")
+    panel = FolderPanel()
+    qtbot.addWidget(panel)
+    panel.set_root(root)
+
+    node = panel._tree.topLevelItem(0)
+    assert node.text(0) == RATED_NODE_TEXT
+    assert node.childCount() == 0
+    assert panel._tree.topLevelItem(1).text(0) == "root"
+
+
+def test_rated_node_absent_without_root(qtbot, tmp_path):
+    panel = FolderPanel()
+    qtbot.addWidget(panel)
+    panel.set_root(None)
+    assert panel._tree.topLevelItemCount() == 0
+
+
+def test_rated_node_click_emits_rated_collection_activated(qtbot, tmp_path):
+    root = tmp_path / "root"
+    _make_folder(root, "A")
+    panel = FolderPanel()
+    qtbot.addWidget(panel)
+    panel.set_root(root)
+    panel.set_folder(root)
+
+    node = panel._tree.topLevelItem(0)
+    with qtbot.waitSignal(panel.rated_collection_activated, timeout=1000):
+        with qtbot.assertNotEmitted(panel.folder_activated):
+            panel._tree.itemClicked.emit(node, 0)
+
+
+def test_rated_node_click_reemits_even_when_already_active(qtbot, tmp_path):
+    """Re-clicking the node is how the user re-collects (a refresh)."""
+    root = tmp_path / "root"
+    _make_folder(root, "A")
+    panel = FolderPanel()
+    qtbot.addWidget(panel)
+    panel.set_root(root)
+    panel.set_collection_active(True)
+
+    node = panel._tree.topLevelItem(0)
+    with qtbot.waitSignal(panel.rated_collection_activated, timeout=1000):
+        panel._tree.itemClicked.emit(node, 0)
+
+
+def test_rated_node_not_in_visible_folders(qtbot, tmp_path):
+    root = tmp_path / "root"
+    a = _make_folder(root, "A")
+    panel = FolderPanel()
+    qtbot.addWidget(panel)
+    panel.set_root(root)
+    assert panel.visible_folders() == [root, a]
+
+
+def test_set_collection_active_highlights_node_and_clears_folder(qtbot, tmp_path):
+    root = tmp_path / "root"
+    a = _make_folder(root, "A")
+    panel = FolderPanel()
+    qtbot.addWidget(panel)
+    panel.set_root(root)
+    panel.set_folder(a)
+
+    panel.set_collection_active(True)
+    node = panel._tree.topLevelItem(0)
+    assert node.font(0).bold()
+    assert panel._tree.currentItem() is node
+    assert not panel._path_to_item[a].font(0).bold()
+    assert panel.current_folder() is None
+
+    panel.set_collection_active(False)
+    assert not node.font(0).bold()
+
+
+def test_set_rated_count_updates_node_text(qtbot, tmp_path):
+    root = tmp_path / "root"
+    _make_folder(root, "A")
+    panel = FolderPanel()
+    qtbot.addWidget(panel)
+    panel.set_root(root)
+    node = panel._tree.topLevelItem(0)
+
+    panel.set_rated_count(12)
+    assert node.text(0) == f"{RATED_NODE_TEXT}   (12장)"
+    panel.set_rated_count(None)
+    assert node.text(0) == RATED_NODE_TEXT
