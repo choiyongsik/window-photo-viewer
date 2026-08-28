@@ -5,6 +5,7 @@ __pycache__/
 dist/
 build/*
 !build/viewer.spec
+!build/installer.iss
 *.egg-info/
 .omc/
 .superpowers/

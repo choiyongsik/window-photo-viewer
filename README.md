@@ -85,6 +85,16 @@ python -m PyInstaller build/viewer.spec --noconfirm --distpath dist --workpath b
 dist\WindowPhotoViewer\WindowPhotoViewer.exe
 ```
 
+폴더 그대로 zip으로 배포하거나(`Compress-Archive dist\WindowPhotoViewer`), 설치 파일을 만들 수 있다:
+
+```powershell
+winget install JRSoftware.InnoSetup          # 최초 1회
+& "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" build\installer.iss
+dist\WindowPhotoViewer-v0.1.2-setup.exe
+```
+
+설치 파일은 기본으로 **현재 사용자 전용**(`%LOCALAPPDATA%\Programs\WindowPhotoViewer`, 관리자 권한 불필요)이며 설치 중 "모든 사용자"를 고를 수 있다. 시작 메뉴 항목·(선택) 바탕화면 아이콘·제거 항목을 만들고, 제거 시 캐시(`%LOCALAPPDATA%\WindowPhotoViewer`)와 설정(`HKCU\Software\WindowPhotoViewer`)도 지운다. 사진 파일에 기록된 별점은 그대로 남는다. 코드 서명이 없어 첫 실행 때 SmartScreen "알 수 없는 게시자" 경고가 뜬다 — "추가 정보 → 실행"으로 넘어가면 된다. 버전을 올릴 때는 `pyproject.toml`과 `build/installer.iss`의 `MyAppVersion`을 함께 바꾼다.
+
 ## 테스트
 
 ```powershell
