@@ -23,6 +23,10 @@ from ui.thumb_views import Filmstrip, GridView
 from ui.video_view import SEEK_STEP_MS, VideoView
 from ui.workers import ImageLoadJob, MetadataWriteJob, RatedCollectJob, ScanJob, ThumbnailJob, WorkerSignals
 
+# User-facing app name. Internal identifiers (QSettings org/app name, the
+# %LOCALAPPDATA%\WindowPhotoViewer folder, the exe) stay "WindowPhotoViewer" so
+# existing settings/caches keep working and paths stay ASCII.
+APP_TITLE = "골라보기"
 PRELOAD_OFFSETS = (1, -1, 2, -2)
 EMPTY_TEXT = "폴더를 열어주세요 (Ctrl+O)"
 NO_ITEMS_TEXT = "이 폴더에 사진이 없습니다"
@@ -67,7 +71,7 @@ class MainWindow(QMainWindow):
         rating_cache: RatingCache | None = None,
     ):
         super().__init__(parent)
-        self.setWindowTitle("Photo Culling Viewer")
+        self.setWindowTitle(APP_TITLE)
         self.resize(1280, 800)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.suppress_dialogs = False

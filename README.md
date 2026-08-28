@@ -1,6 +1,6 @@
-# Photo Culling Viewer
+# 골라보기 (window-photo-viewer)
 
-촬영 직후 JPEG/PNG 폴더를 키보드로 훑으며 별점을 매기는 Windows 뷰어.
+촬영 직후 JPEG/PNG 폴더를 키보드로 훑으며 별점을 매기는 Windows 뷰어 — 사진을 **골라** 별점 매기며 **보기**. 창 제목·설치 프로그램·시작 메뉴에는 「골라보기」로 표시되고, 실행 파일·설정·캐시 경로는 `WindowPhotoViewer`를 그대로 쓴다.
 지원 포맷: `.jpg` `.jpeg` `.png` 이미지, `.mp4` `.mov` 영상.
 별점·색 라벨은 **이미지 내장 XMP**(`xmp:Rating`, `xmp:Label`)에 기록되어 Lightroom Classic 임포트 시 그대로 읽힌다.
 

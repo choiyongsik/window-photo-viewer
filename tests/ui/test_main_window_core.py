@@ -42,6 +42,13 @@ def win(qtbot, tmp_path: Path):
     return w
 
 
+def test_window_title_is_the_korean_app_name(win):
+    from ui.main_window import APP_TITLE
+
+    assert APP_TITLE == "골라보기"
+    assert win.windowTitle() == APP_TITLE
+
+
 def test_empty_state(win):
     assert win.current == -1
     assert win.current_item() is None

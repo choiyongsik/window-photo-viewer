@@ -1,4 +1,4 @@
-"""Photo Culling Viewer entry point.
+"""골라보기 (Photo Culling Viewer) entry point.
 
 Usage: python app.py [folder-or-image-path]
 Without an argument the last opened folder (QSettings) is restored.
@@ -10,7 +10,7 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
 
-from ui.main_window import MainWindow
+from ui.main_window import APP_TITLE, MainWindow
 
 
 def resolve_start_folder(argv: list[str], fallback: Path | None) -> Path | None:
@@ -28,8 +28,9 @@ def resolve_start_folder(argv: list[str], fallback: Path | None) -> Path | None:
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv if argv is None else argv
     app = QApplication(argv)
-    app.setApplicationName("WindowPhotoViewer")
+    app.setApplicationName("WindowPhotoViewer")      # internal: QSettings key, stays ASCII
     app.setOrganizationName("WindowPhotoViewer")
+    app.setApplicationDisplayName(APP_TITLE)         # what Windows shows in the taskbar
     window = MainWindow()
     window.show()
     folder = resolve_start_folder(argv, window.last_folder())
