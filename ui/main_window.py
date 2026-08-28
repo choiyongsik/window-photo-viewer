@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 
 from PySide6.QtCore import QByteArray, QFileSystemWatcher, QSettings, Qt, QThreadPool, QTimer
-from PySide6.QtGui import QAction, QActionGroup, QImage, QKeyEvent, QKeySequence, QPixmap
+from PySide6.QtGui import QAction, QActionGroup, QIcon, QImage, QKeyEvent, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QFileDialog, QLabel, QMainWindow, QMessageBox, QSplitter, QStackedWidget, QVBoxLayout, QWidget,
 )
@@ -19,6 +19,7 @@ from ui.folder_panel import RATED_NODE_TEXT, FolderPanel
 from ui.image_cache import ImageCache
 from ui.loupe_view import LoupeView
 from ui.media_list_model import MediaListModel
+from ui.resources import app_icon_path
 from ui.thumb_views import Filmstrip, GridView
 from ui.video_view import SEEK_STEP_MS, VideoView
 from ui.workers import ImageLoadJob, MetadataWriteJob, RatedCollectJob, ScanJob, ThumbnailJob, WorkerSignals
@@ -72,6 +73,7 @@ class MainWindow(QMainWindow):
     ):
         super().__init__(parent)
         self.setWindowTitle(APP_TITLE)
+        self.setWindowIcon(QIcon(str(app_icon_path())))
         self.resize(1280, 800)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.suppress_dialogs = False

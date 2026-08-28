@@ -6,6 +6,8 @@ dist/
 build/*
 !build/viewer.spec
 !build/installer.iss
+!build/__init__.py
+!build/make_icon.py
 *.egg-info/
 .omc/
 .superpowers/

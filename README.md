@@ -93,6 +93,8 @@ winget install JRSoftware.InnoSetup          # 최초 1회
 dist\WindowPhotoViewer-v0.1.2-setup.exe
 ```
 
+앱 아이콘(`assets/icon.ico`, `icon.png`)은 `python build/make_icon.py`가 Pillow로 그려서 만든다 — 디자인을 바꾸려면 그 스크립트를 고치고 다시 실행한다. 창·작업 표시줄(`ui/resources.py`), exe(`viewer.spec`의 `icon=`), 설치 마법사(`SetupIconFile`)가 같은 파일을 쓴다.
+
 설치 파일은 기본으로 **현재 사용자 전용**(`%LOCALAPPDATA%\Programs\WindowPhotoViewer`, 관리자 권한 불필요)이며 설치 중 "모든 사용자"를 고를 수 있다. 시작 메뉴 항목·(선택) 바탕화면 아이콘·제거 항목을 만들고, 제거 시 캐시(`%LOCALAPPDATA%\WindowPhotoViewer`)와 설정(`HKCU\Software\WindowPhotoViewer`)도 지운다. 사진 파일에 기록된 별점은 그대로 남는다. 코드 서명이 없어 첫 실행 때 SmartScreen "알 수 없는 게시자" 경고가 뜬다 — "추가 정보 → 실행"으로 넘어가면 된다. 버전을 올릴 때는 `pyproject.toml`과 `build/installer.iss`의 `MyAppVersion`을 함께 바꾼다.
 
 ## 테스트

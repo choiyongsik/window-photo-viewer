@@ -39,6 +39,7 @@ WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayIcon={app}\{#MyAppExeName}
+SetupIconFile=..\assets\icon.ico
 ; Ratings live in the photos themselves; the app keeps only caches/settings locally.
 ; Uninstall removes the program files; caches under %LOCALAPPDATA%\WindowPhotoViewer are
 ; removed too (see [UninstallDelete]) — they are regenerated on demand.

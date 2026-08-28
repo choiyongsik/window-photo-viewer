@@ -6,6 +6,8 @@ from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
 
 binaries = collect_dynamic_libs("pyexiv2")
 datas = collect_data_files("imageio_ffmpeg")   # bundled ffmpeg.exe
+ICON = os.path.join(SPECPATH, "..", "assets", "icon.ico")  # noqa: F821
+datas.append((ICON, "assets"))                 # window icon at runtime (ui.resources)
 
 a = Analysis(
     ["../app.py"],
@@ -27,5 +29,6 @@ exe = EXE(
     name="WindowPhotoViewer",
     debug=False,
     console=False,
+    icon=ICON,                                 # Explorer / taskbar icon of the exe itself
 )
 coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name="WindowPhotoViewer")
